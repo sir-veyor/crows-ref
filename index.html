@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Crows Ref Tool</title>
+<meta name="description" content="Referee companion for the Crows public playtest: search, rollers, timers, trackers.">
+<meta name="theme-color" content="#111315">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header id="top">
+  <button id="navToggle" class="icon-btn" aria-label="Menu">☰</button>
+  <a href="#/session" class="brand">Crows <span>Ref</span></a>
+  <div class="searchwrap">
+    <input id="q" type="search" placeholder="Search everything…  ( / )" autocomplete="off" spellcheck="false">
+    <div id="qres" class="qres" hidden></div>
+  </div>
+  <button id="dtMini" class="dtmini" title="Dungeon turn timer">DT <b id="dtMiniNum">0</b> <span id="dtMiniTime">30:00</span></button>
+  <div class="quickdice">
+    <button data-roll="1d6">d6</button><button data-roll="1d10">d10</button><button data-roll="2d10">2d10</button><button data-roll="1d100">d100</button>
+  </div>
+  <button id="logBtn" class="icon-btn" title="Roll log">🎲</button>
+</header>
+<nav id="side"></nav>
+<main id="main"></main>
+<aside id="drawer" hidden>
+  <div class="drawer-head"><span id="drawerTitle"></span><span class="sp"></span><button id="drawerOpen" class="btn sm">Open page</button><button id="drawerClose" class="icon-btn" aria-label="Close">✕</button></div>
+  <div id="drawerBody"></div>
+</aside>
+<aside id="logPanel" hidden>
+  <div class="drawer-head"><span>Roll log</span><span class="sp"></span><button id="logClear" class="btn sm">Clear</button><button id="logClose" class="icon-btn" aria-label="Close">✕</button></div>
+  <div id="logBody"></div>
+</aside>
+<div id="toast"></div>
+<div id="present" hidden>
+  <div class="p-dt">Dungeon Turn <b id="pNum">1</b></div>
+  <div class="p-time" id="pTime">30:00</div>
+  <div class="p-greed" id="pGreed"></div>
+  <button id="pClose" class="btn">Close</button>
+</div>
+<script src="data.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
