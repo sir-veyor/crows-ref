@@ -10,9 +10,12 @@ const uid = () => Math.random().toString(36).slice(2, 9);
 function rnd(n) { const a = new Uint32Array(1); crypto.getRandomValues(a); return 1 + (a[0] % n); }
 
 /* ---------------- state ---------------- */
-const KEY = 'crowsRef.v1';
+const KEY = 'crowsRef.v1';          // never change this key — it is where everyone's saves live
+const BACKUP_KEY = 'crowsRef.backup'; // automatic copy taken before any save-format upgrade
+const SAVE_VERSION = 2;              // bump only when the save format changes, and add a step to migrate()
 const DEFAULT = () => ({
   settings: { dtMin: 30, sound: true, mode: 'timer' },
+  v: 2, lastExport: 0,
   dt: { num: 0, running: false, endAt: 0, left: 30 * 60000, alerted: 0, rooms: 0, roomsDone: 0 },
   en: { ctx: 'dungeon', crowded: false, chaos: false, seclude: false, pace: 'normal', scout: false, other: 0, table: '' },
   ud: [], combat: { round: 0, pcsFirst: null, phase: 0, list: [] },
@@ -21,11 +24,18 @@ const DEFAULT = () => ({
   test: { mod: 0, edges: 0, banes: 0, bonus: 0, effort: false },
 });
 let S;
+function migrate(s) {
+  // Upgrades older saves in place. Only ever ADD fields here; never delete a player's data.
+  if (!s.v || s.v < 2) { s.lastExport = s.lastExport || 0; }
+  s.v = SAVE_VERSION;
+  return s;
+}
 function load() {
-  let s = null;
-  try { s = JSON.parse(localStorage.getItem(KEY) || 'null'); } catch (e) { s = null; }
+  let raw = null, s = null;
+  try { raw = localStorage.getItem(KEY); s = JSON.parse(raw || 'null'); } catch (e) { s = null; }
   const d = DEFAULT();
-  if (!s) return d;
+  if (!s) { if (raw) try { localStorage.setItem(KEY + '.unreadable-' + Date.now(), raw); } catch (e) { } return d; }
+  if ((s.v || 1) < SAVE_VERSION) { try { localStorage.setItem(BACKUP_KEY, raw); } catch (e) { } s = migrate(s); }
   for (const k in d) if (s[k] === undefined) s[k] = d[k];
   for (const k of ['settings', 'dt', 'en', 'combat', 'notes', 'travel', 'test']) s[k] = Object.assign(d[k], s[k]);
   return s;
@@ -257,8 +267,37 @@ function itemCardHTML(c, opts = {}) {
     ${itemExtra(c) ? `<div class="ex">${esc(itemExtra(c))}</div>` : ''}
     ${body}
     <div class="pr">${c.cat ? esc(c.cat) + ' · ' : ''}${esc(c.price || '—')}</div>
+    ${opts.noCraft ? '' : craftLine(craftFor(c))}
     ${c.found ? `<div class="ex">Dungeon cards: ${c.found.map(esc).join(', ')}</div>` : ''}
   </div>${opts.actions !== false ? `<div class="row" style="margin-top:6px">${pinBtn('item', c.id, c.name)}</div>` : ''}`;
+}
+
+/* ---------------- crafting ---------------- */
+const CRAFT = {};
+function craftKey(n) { let k = norm(String(n).replace(/&amp;/g, '&')).replace(/\*/g, '').replace(/\s*\([^)]*\)/g, '').trim(); const m = k.match(/^(.*), (strong|greater)$/); if (m) k = m[2] + ' ' + m[1]; return k; }
+(D.craft || []).forEach(r => {
+  const k = craftKey(r.name); const vm = k.match(/^(fine|masterwork) (.*)$/);
+  if (r.src === 'Upgraded Armor' || /armor|shield/i.test(r.name)) r.exp = r.exp || 'Blacksmithing';
+  if (vm) { const base = CRAFT[vm[2]] ||= { variants: [] }; base.variants = base.variants || []; base.variants.push(Object.assign({ q: vm[1][0].toUpperCase() + vm[1].slice(1) }, r)); }
+  else { const cur = CRAFT[k]; CRAFT[k] = Object.assign({ variants: cur ? cur.variants || [] : [] }, r); }
+});
+const CRAFT_NS = {}; for (const [k, v] of Object.entries(CRAFT)) CRAFT_NS[k.replace(/\s+/g, '')] = v;
+const dash = v => !v || v === '-';
+function craftFor(c) {
+  if (c.cat === 'Spellbook') return null;
+  const k = craftKey(c.name);
+  let r = CRAFT[k] || CRAFT[craftKey(c.name.replace(/^(MW|Fine)\s+/, ''))] || CRAFT_NS[k.replace(/\s+/g, '')] || CRAFT[k + ' vial'];
+  if (!r && (c.cat === 'Weapon' || /Quiver|Crossbow Bolts/.test(c.name)) && c.src !== 'dungeon') {
+    const bow = /\bBow\b/.test(JSON.stringify(c.body)) && !/Quiver|Bolts/.test(c.name);
+    r = { exp: 'Blacksmithing', cx: '1', mat: bow ? '1 hickory log' : '1 iron bar', goal: '5', rule: true, variants: [] };
+  }
+  return r || null;
+}
+function craftLine(r) {
+  if (!r) return '';
+  const can = !dash(r.cx) || !dash(r.mat);
+  const v = (r.variants || []).map(x => `<div>${esc(x.q)} (${esc(x.price)}): ${dash(x.cx) ? 'buy only' : `${esc(x.exp && !dash(x.exp) ? x.exp : r.exp)} · complexity ${esc(x.cx)} · ${esc(x.mat)} · goal ${esc(x.goal)}`}</div>`).join('');
+  return `<div class="craft">${can ? `<b>⚒ Craft:</b> ${esc(dash(r.exp) ? 'no expertise listed' : r.exp)} · complexity ${esc(r.cx)} · ${esc(r.mat)} · goal ${esc(r.goal)}${r.rule ? ' <span class="faint">(standard weapon rule)</span>' : ''}` : '<span class="faint">Not craftable — buy or find it</span>'}${v}</div>`;
 }
 
 /* ---------------- table rolling ---------------- */
@@ -456,6 +495,7 @@ VIEWS.session = () => {
   const encTables = D.tables.filter(t => /^(Angel|Blood|Demon|Plant|Undead) Encounters$|^Any Monster Encounter$|^Travel Encounters$/.test(t.name));
   $('#main').innerHTML = `
   <div class="page-title"><h1>Session</h1><span class="muted">Dungeon turns, encounter checks, usage dice and your notes in one place.</span></div>
+  ${(!S.lastExport || Date.now() - S.lastExport > 14 * 864e5) && (S.notes.campaign || S.roster.length || Object.keys(S.progress).length) ? `<div class="notice sm">Your game is saved in this browser only. <a href="#/settings">Export a backup</a> now and then${S.lastExport ? ` (last one: ${new Date(S.lastExport).toLocaleDateString()})` : ''}.</div>` : ''}
   <div class="grid dash">
     <div class="card" id="dtCard"></div>
     <div class="card">
@@ -983,14 +1023,15 @@ function weaponTable(L) {
 }
 function armorTable(L) {
   L = [...L].sort((x, y) => (armorInfo(x).type === 'Shield') - (armorInfo(y).type === 'Shield') || (+armorInfo(x).ad) - (+armorInfo(y).ad));
-  return `<div style="overflow-x:auto"><table class="tbl"><tr><th>Armor</th><th>Type</th><th>AD</th><th>Slots</th><th>Price</th></tr>${L.map(c => { const a = armorInfo(c); return `<tr><td><span class="ilink" data-i="${c.id}"><b>${expandName(c.name)}</b></span></td><td>${a.type}</td><td>${a.ad}</td><td>${slotsOf(c)}</td><td>${esc(c.price || '—')}</td></tr>`; }).join('')}</table></div>`;
+  return `<div style="overflow-x:auto"><table class="tbl"><tr><th>Armor</th><th>Type</th><th>AD</th><th>Slots</th><th>Price</th><th>Complexity</th><th>Materials</th><th>Goal</th></tr>${L.map(c => { const a = armorInfo(c), r = craftFor(c) || {}; return `<tr><td><span class="ilink" data-i="${c.id}"><b>${expandName(c.name)}</b></span></td><td>${a.type}</td><td>${a.ad}</td><td>${slotsOf(c)}</td><td>${esc(c.price || '—')}</td><td>${esc(r.cx || '—')}</td><td>${esc(r.mat || '—')}</td><td>${esc(r.goal || '—')}</td></tr>`; }).join('')}</table></div>`;
 }
 VIEWS.items = () => {
-  const st = VIEWS.items.st ||= { q: '', view: 'table' };
+  const st = VIEWS.items.st ||= { q: '', view: 'table', craft: 'Any' };
   const ref = ['Armor Types', 'Upgraded Armor', 'Armor Enchantments', 'Weapon Types', 'Weapon Qualities', 'Ammunition', 'Upgraded Weapons', 'Weapon Enchantments', 'Gear', 'Alchemical Items', 'Enchanted Items', 'Crafting Materials', 'Treasure', 'Shopping', 'Money']
     .map(n => { const b = D.books.chars.blocks.find(b => b.t === 'h' && b.text === n && b.lvl <= 3); return b ? `<a class="chip" href="#/book/chars/${b.id}">${esc(n)}</a>` : ''; }).join(' ');
   $('#main').innerHTML = `<div class="page-title"><h1>Items</h1><span class="muted">${D.items.filter(c => c.cat !== 'Spellbook').length} item cards · spells are on the <a href="#/spells">Spells</a> tab</span></div>
   <div class="row" style="margin-bottom:10px"><input id="iq" placeholder="Filter all items…" value="${esc(st.q)}" style="flex:1;max-width:340px">
+    <select id="icraft" title="Show only items you can craft with this expertise">${['Any', 'Craftable', 'Alchemy', 'Blacksmithing', 'Enchanting'].map(x => `<option value="${x}" ${st.craft === x ? 'selected' : ''}>${x === 'Any' ? 'All items' : x === 'Craftable' ? 'Craftable only' : 'Craft with ' + x}</option>`).join('')}</select>
     <span class="chip ${st.view === 'table' ? 'on' : ''}" data-view="table">Tables for weapons &amp; armor</span><span class="chip ${st.view === 'cards' ? 'on' : ''}" data-view="cards">Cards everywhere</span></div>
   <div class="filters" id="jump"></div>
   <div id="isecs"></div>
@@ -998,6 +1039,7 @@ VIEWS.items = () => {
   const draw = () => {
     let L = D.items.filter(c => c.cat !== 'Spellbook');
     if (st.q) { const q = st.q.toLowerCase(); L = L.filter(c => (c.name + ' ' + strip(JSON.stringify(c.body))).toLowerCase().includes(q)); }
+    if (st.craft !== 'Any') L = L.filter(c => { const r = craftFor(c); if (!r || (dash(r.cx) && dash(r.mat))) return false; return st.craft === 'Craftable' || r.exp === st.craft; });
     const secs = itemSections(L).filter(s => s[2].length);
     $('#jump').innerHTML = secs.map(([id, t, l]) => `<a class="chip" href="#" data-jump="sec-${id}">${esc(t)} <span class="faint">${l.length}</span></a>`).join('') + `<a class="chip" href="#" data-jump="sec-rules">Equipment rules</a>`;
     $('#isecs').innerHTML = secs.map(([id, t, l]) => {
@@ -1006,12 +1048,13 @@ VIEWS.items = () => {
       if (st.view === 'table' && id === 'weapons') body = weaponTable(core) + (found.length ? `<h4>Upgraded weapons found in dungeons</h4>${weaponTable(found)}` : '');
       else if (st.view === 'table' && id === 'armor') body = armorTable(core) + (found.length ? `<h4>Upgraded armor found in dungeons</h4>${armorTable(found)}` : '');
       else body = `<div class="grid igrid">${l.map(c => `<div>${itemCardHTML(c, { link: true, actions: false })}</div>`).join('')}</div>`;
-      return `<h2 id="sec-${id}">${esc(t)} <span class="faint sm">${l.length}</span></h2>${id === 'weapons' && st.view === 'table' ? '<p class="sm muted">Hover a quality for its rule. Click a name for the full card.</p>' : ''}${body}`;
+      return `<h2 id="sec-${id}">${esc(t)} <span class="faint sm">${l.length}</span></h2>${id === 'weapons' && st.view === 'table' ? '<p class="sm muted">Hover a quality for its rule. Click a name for the full card. <b>Crafting:</b> every standard weapon (and 20 arrows or bolts) is Blacksmithing, complexity 1, goal 5 — bows need 1 hickory log, everything else 1 iron bar.</p>' : ''}${body}`;
     }).join('') || '<p class="muted">No matches.</p>';
     $$('[data-jump]').forEach(a => a.onclick = e => { e.preventDefault(); const el = document.getElementById(a.dataset.jump); if (el) { el.scrollIntoView(); window.scrollBy(0, -70); } });
   };
   draw();
   $('#iq').oninput = e => { st.q = e.target.value; draw(); };
+  $('#icraft').onchange = e => { st.craft = e.target.value; draw(); };
   $$('[data-view]').forEach(c => c.onclick = () => { st.view = c.dataset.view; $$('[data-view]').forEach(x => x.classList.toggle('on', x === c)); draw(); });
 };
 VIEWS.spells = () => {
@@ -1058,7 +1101,7 @@ VIEWS.pregens = ([lvl]) => {
     <div class="stat" style="border:none;padding:0;background:none"><div class="sg">${[['Strength', p.str], ['Agility', p.agi], ['Mind', p.mind], ['Stamina', p.stamina], ['Speed', p.speed], ['Effort', p.effort], ['AD', p.ad]].map(x => `<div><b>${x[0]}</b>${esc(x[1])}</div>`).join('')}</div></div>
     <div class="sm"><b>General:</b> ${esc(p.gen)}<br><b>Weapon:</b> ${esc(p.weap)}<br><b>Magic:</b> ${esc(p.magic)}</div>
     <details><summary>Traits (${p.traits.length})</summary><ul class="sm">${p.traits.map(t => `<li>${esc(t).replace(/^([^:]{2,60}):/, '<b>$1</b>:')}</li>`).join('')}</ul></details>
-    <details><summary>Inventory cards (${p.cards.length})</summary><div class="grid" style="grid-template-columns:repeat(auto-fill,minmax(200px,1fr));margin-top:6px">${p.cards.map(c => itemCardHTML(Object.assign({ cat: '' }, c), { actions: false })).join('')}</div></details>
+    <details><summary>Inventory cards (${p.cards.length})</summary><div class="grid" style="grid-template-columns:repeat(auto-fill,minmax(200px,1fr));margin-top:6px">${p.cards.map(c => itemCardHTML(Object.assign({ cat: '' }, c), { actions: false, noCraft: true })).join('')}</div></details>
   </div>`).join('')}</div>`;
   const h = location.hash.split('#')[2]; if (h) { const el = document.getElementById(h); if (el) el.scrollIntoView(); }
 };
@@ -1131,16 +1174,18 @@ VIEWS.settings = () => {
     <div class="card"><h3>Your saved game</h3>
       <p class="sm">Everything you do here (timers, trackers, notes, dungeon progress, pins, roll log) saves automatically in <b>this browser on this device</b>. It survives closing the tab. Clearing your browser data erases it, so export a backup now and then.</p>
       <div class="row"><button class="btn primary" id="exp">Export save file</button><label class="btn">Import save file<input type="file" id="imp" accept="application/json,.json" hidden></label><button class="btn" id="rst">Reset everything</button></div>
-      <p class="sm muted" id="saveInfo"></p></div>
+      <p class="sm muted" id="saveInfo"></p>
+      <p class="sm">Updating the site (new files on GitHub) <b>never erases saves</b>. If a future update changes the save format, a copy of your old save is kept automatically${localStorage.getItem(BACKUP_KEY) ? ' — <button class="btn sm" id="restoreBk">Restore the automatic backup</button>' : '.'}</p></div>
     <div class="card"><h3>Install as an app</h3><p class="sm">On a phone or laptop, use your browser’s “Install app” / “Add to Home Screen”. It then opens in its own window and works offline.</p></div>
     <div class="card"><h3>About</h3><p class="sm">An unofficial Ref companion built from the MCDM <i>Crows</i> public playtest (October 2026, playtest 3) files. All game text belongs to MCDM. Keep it to your own table; don’t post it publicly.</p>
       <p class="sm muted">Keyboard: <kbd>/</kbd> search · <kbd>Esc</kbd> close panels · <kbd>↑</kbd><kbd>↓</kbd><kbd>Enter</kbd> pick a result.</p></div>
   </div>`;
-  $('#saveInfo').textContent = `Current save: ${(JSON.stringify(S).length / 1024).toFixed(1)} KB`;
+  $('#saveInfo').textContent = `Current save: ${(JSON.stringify(S).length / 1024).toFixed(1)} KB · last exported: ${S.lastExport ? new Date(S.lastExport).toLocaleDateString() : 'never'}`;
+  if ($('#restoreBk')) $('#restoreBk').onclick = () => { if (confirm('Replace your current save with the automatic backup?')) { localStorage.setItem(KEY, localStorage.getItem(BACKUP_KEY)); S = load(); route(); tick(); toast('Backup restored.'); } };
   $$('[data-dtm]').forEach(c => c.onclick = () => { const v = c.dataset.dtm; if (v === 'rooms') S.settings.mode = 'rooms'; else { S.settings.mode = 'timer'; S.settings.dtMin = +v; if (!S.dt.num) S.dt.left = +v * 60000; } save(); VIEWS.settings(); tick(); });
   $('#snd').onchange = e => { S.settings.sound = e.target.checked; save(); };
   $('#testBeep').onclick = () => { const s = S.settings.sound; S.settings.sound = true; beep(); S.settings.sound = s; };
-  $('#exp').onclick = () => { const b = new Blob([JSON.stringify(S, null, 1)], { type: 'application/json' }); const a = document.createElement('a'); a.href = URL.createObjectURL(b); a.download = `crows-ref-save-${new Date().toISOString().slice(0, 10)}.json`; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 2000); };
+  $('#exp').onclick = () => { S.lastExport = Date.now(); save(); const b = new Blob([JSON.stringify(S, null, 1)], { type: 'application/json' }); const a = document.createElement('a'); a.href = URL.createObjectURL(b); a.download = `crows-ref-save-${new Date().toISOString().slice(0, 10)}.json`; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 2000); };
   $('#imp').onchange = e => { const f = e.target.files[0]; if (!f) return; f.text().then(t => { try { const s = JSON.parse(t); if (!s || typeof s !== 'object' || !s.settings) throw 0; localStorage.setItem(KEY, JSON.stringify(s)); S = load(); toast('Save file imported.'); route(); tick(); } catch (err) { toast('That file isn’t a Crows Ref save.'); } }); };
   $('#rst').onclick = () => { if (confirm('Erase all timers, trackers, notes, progress and logs on this device?')) { S = DEFAULT(); localStorage.setItem(KEY, JSON.stringify(S)); route(); tick(); } };
 };
@@ -1208,4 +1253,5 @@ $('#dtMini').onclick = () => { location.hash = '#/session'; };
 $('#pClose').onclick = () => $('#present').hidden = true;
 window.addEventListener('hashchange', route);
 route(); tick(); setInterval(tick, 500);
+if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => { });
 if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => { });

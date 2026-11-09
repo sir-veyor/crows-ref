@@ -133,6 +133,7 @@ g,.g{display:inline-block;min-width:3.6em;text-align:center;font-weight:700;font
 .icard .in{font-weight:700;font-size:1rem;display:flex;gap:6px;align-items:baseline}
 .icard .in .stk{margin-left:auto;font-weight:400;font-size:.8rem;color:#5c5246;white-space:nowrap}
 .icard .ex{font-size:.8rem;color:#5c5246}
+.icard .craft{font-size:.78rem;color:#4a4136;border-top:1px dashed #c9bfae;margin-top:6px;padding-top:5px}
 .icard .pr{font-size:.78rem;color:#5c5246;text-align:right;margin-top:6px}
 .icard .tiers{border-color:#c9bfae}.icard .tiers>div.c{border-color:#c9bfae}
 .icard .tiers .c1 .h{color:#8a2b20}.icard .tiers .c2 .h{color:#8a6510}.icard .tiers .c3 .h{color:#1f6b3c}
