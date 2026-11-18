@@ -12,7 +12,7 @@ function rnd(n) { const a = new Uint32Array(1); crypto.getRandomValues(a); retur
 /* ---------------- state ---------------- */
 const KEY = 'crowsRef.v1';          // never change this key — it is where everyone's saves live
 const BACKUP_KEY = 'crowsRef.backup'; // automatic copy taken before any save-format upgrade
-const SAVE_VERSION = 2;              // bump only when the save format changes, and add a step to migrate()
+const SAVE_VERSION = 3;              // bump only when the save format changes, and add a step to migrate()
 const DEFAULT = () => ({
   settings: { dtMin: 30, sound: true, mode: 'timer' },
   v: 2, lastExport: 0,
@@ -20,13 +20,16 @@ const DEFAULT = () => ({
   en: { ctx: 'dungeon', crowded: false, chaos: false, seclude: false, pace: 'normal', scout: false, other: 0, table: '' },
   ud: [], combat: { round: 0, pcsFirst: null, phase: 0, list: [] },
   log: [], notes: { session: '', campaign: '' }, roster: [], progress: {}, pins: [], recent: [], tmods: {},
-  travel: { pace: 'normal', slow: 'normal', road: false, river: false, down: false, guide: 'none', scout: 'none' },
+  travel: { pace: 'normal', slow: 'normal', road: false, river: false, down: false, roles: [], lost: false, enx: 0, day: 1 },
+  enc: { dtype: 'Any', habitat: 'Forest', nearby: 'Undead', climate: 'Spring', party: 4, cur: null, history: [], autogen: null },
+  rest: { where: 'miasma', day: 1, pcs: {}, log: [] },
   test: { mod: 0, edges: 0, banes: 0, bonus: 0, effort: false },
 });
 let S;
 function migrate(s) {
   // Upgrades older saves in place. Only ever ADD fields here; never delete a player's data.
   if (!s.v || s.v < 2) { s.lastExport = s.lastExport || 0; }
+  if (s.v < 3) { s.travel = s.travel || {}; s.travel.roles = s.travel.roles || []; }  // v3: encounter hub, rest tab, travel roles board
   s.v = SAVE_VERSION;
   return s;
 }
@@ -37,7 +40,7 @@ function load() {
   if (!s) { if (raw) try { localStorage.setItem(KEY + '.unreadable-' + Date.now(), raw); } catch (e) { } return d; }
   if ((s.v || 1) < SAVE_VERSION) { try { localStorage.setItem(BACKUP_KEY, raw); } catch (e) { } s = migrate(s); }
   for (const k in d) if (s[k] === undefined) s[k] = d[k];
-  for (const k of ['settings', 'dt', 'en', 'combat', 'notes', 'travel', 'test']) s[k] = Object.assign(d[k], s[k]);
+  for (const k of ['settings', 'dt', 'en', 'combat', 'notes', 'travel', 'test', 'enc', 'rest']) s[k] = Object.assign(d[k], s[k]);
   return s;
 }
 S = load();
@@ -167,6 +170,69 @@ function fmt(html, opts = {}) {
     if (mo) return `<b><span class="mlink" data-m="${mo.id}">${inner}</span></b>`;
     return m;
   });
+  if (opts.rules) s = ruleLinkHTML(s);
+  return s;
+}
+
+/* ---------------- rules-term linking (item & spell cards) ---------------- */
+const RULE_TERMS = [
+  [/\bLight\s+\d+\/\d+/, 'rules-light'], [/\b(?:bright light|dim light|darkness)\b/i, 'rules-light'],
+  [/\bP dam\b/, 'rules-piercing-damage'], [/\bpiercing damage\b/i, 'rules-piercing-damage'],
+  [/\bAD\b/, 'rules-armor-defense'], [/\bUD\b/, 'rules-equipment-usage-dice'], [/\busage dice\b/i, 'rules-usage-dice'],
+  [/\b(?:Useless|Refuel|Activate)\b/, 'rules-equipment-usage-dice'],
+  [/\b[Mm]aneuvers?\b/, 'rules-maneuvers'], [/\b[Rr]eactions?\b/, 'rules-reactions'], [/\b[Aa]ctions?\b/, 'rules-actions'],
+  [/\b(?:Melee|Ranged) \d+(?:\/Ranged \d+)?/, 'rules-making-attacks'], [/\bAttack\b/, 'rules-making-attacks'],
+  [/\bRRs?\b/, 'rules-resistance-rolls'], [/\b(?:double edge|double bane|edges?|banes?)\b/, 'rules-edges-and-banes'],
+  [/\b(?:crits?|dooms?)\b/, 'rules-crits-and-dooms'], [/\bEffort\b/, 'rules-effort-expertise'], [/\bexpertises?\b/, 'rules-effort-expertise'],
+  [/\bwounds?\b/, 'rules-wounds'], [/\bStamina\b/, 'rules-stamina'],
+  [/\b(?:[Vv]ertical )?(?:[Pp]ush|[Ss]lide) \d+/, 'rules-forced-movement'], [/\bteleport(?:s|ed|ing)?\b/i, 'rules-teleporting'],
+  [/\bdifficult terrain\b/i, 'rules-difficult-terrain'], [/\bopportunity attacks?\b/i, 'rules-opportunity-attack'],
+  [/\bcounters?\b/, 'rules-counter'], [/\bflank(?:s|ing)?\b/, 'rules-flanking'], [/\bhigh ground\b/, 'rules-high-ground'],
+  [/\bcover\b/, 'rules-cover'], [/\bline of effect\b/i, 'rules-line-of-effect'], [/\b(?:hidden|hide|sneak)\b/, 'rules-hide-and-sneak'],
+  [/\b(?:Aura|Cube) \d+|\bLine \d+ ?× ?\d+/, 'rules-area-of-effect'], [/\bmagic item slots?\b|\bwearable\b/i, 'rules-magic-item-slots'],
+  [/\bsummon(?:s|ed)?\b/i, 'rules-summoned-creatures'], [/\bbacklash(?:es)?\b/i, 'rules-magic-backlashes'],
+  [/\b(?:blessed|grabbed|prone|vulnerable|unconscious|weakened)\b/i, 'COND'],
+];
+const RULE_RE = new RegExp(RULE_TERMS.map(t => '(?:' + t[0].source + ')').join('|'), 'g');
+const RULE_TIP = {};
+function ruleTip(id) {
+  if (RULE_TIP[id] != null) return RULE_TIP[id];
+  const h = HEAD[id]; let t = '';
+  if (h) { const bl = D.books[h.book].blocks; for (let j = h.i + 1; j < bl.length && t.length < 240; j++) { if (bl[j].t === 'h' && t) break; if (bl[j].t === 'p') t += strip(bl[j].text) + ' '; } }
+  return RULE_TIP[id] = t.trim().slice(0, 260) + (t.length > 260 ? '…' : '');
+}
+function ruleIdFor(m) {
+  for (const [re, id] of RULE_TERMS) if (new RegExp('^(?:' + re.source + ')$', re.flags.replace('g', '')).test(m)) return id === 'COND' ? 'rules-' + m.toLowerCase() : id;
+  return null;
+}
+function rlink(text, id, tip) { return HEAD[id] ? `<span class="rlink" data-h="${id}" title="${esc(tip ?? ruleTip(id))}">${text}</span>` : text; }
+const WEAPON_TYPES = ['bashing', 'bow', 'chopping', 'slashing', 'stabbing', 'unarmed'];
+function qualityLinks(inner) {
+  // "Bashing, Light, Pummeling" / "Parry 6" -> each linked to Weapon Types / Weapon Qualities
+  const parts = inner.split(/(,\s*)/);
+  let any = false;
+  const out = parts.map(p => {
+    const key = p.trim().replace(/\s+(?:\d+|X)$/, '').toLowerCase();
+    if (!key || /^,/.test(p)) return p;
+    if (WEAPON_TYPES.includes(key) && HEAD['chars-weapon-types']) { any = true; return rlink(p, 'chars-weapon-types', QUAL[key] || 'Weapon type: decides which weapon expertise applies.'); }
+    if (QUAL[key] && HEAD['chars-weapon-qualities']) { any = true; return rlink(p, 'chars-weapon-qualities', QUAL[key]); }
+    return p;
+  });
+  return any ? out.join('') : null;
+}
+// apply fn to plain text that is not already inside a <span>
+function mapText(html, fn) {
+  const parts = String(html).split(/(<[^>]+>)/); let depth = 0;
+  for (let i = 0; i < parts.length; i++) {
+    const p = parts[i];
+    if (p.startsWith('<')) { if (/^<span\b/.test(p)) depth++; else if (p === '</span>' && depth) depth--; continue; }
+    if (!depth && p) parts[i] = fn(p);
+  }
+  return parts.join('');
+}
+function ruleLinkHTML(html) {
+  let s = String(html).replace(/<i>([^<]+)<\/i>/g, (m, inner) => { const q = qualityLinks(inner); return q ? `<i>${q}</i>` : m; });
+  s = mapText(s, t => t.replace(RULE_RE, m => { const id = ruleIdFor(m); return id ? rlink(m, id) : m; }));
   return s;
 }
 
@@ -258,13 +324,14 @@ function itemExtra(c) {
 }
 function itemCardHTML(c, opts = {}) {
   const body = c.body.map(x => {
-    if (x[0] === 'p') return `<p>${fmt(x[1], { noTables: true })}</p>`;
+    const fo = { noTables: true, noConds: true, rules: opts.rules !== false };
+    if (x[0] === 'p') return `<p>${fmt(x[1], fo)}</p>`;
     const hd = x[1], cells = x[2];
-    return `<div class="tiers" style="grid-template-columns:repeat(${hd.length},1fr)">${hd.map((hh, i) => `<div class="c c${hd.length === 2 ? i + 2 : i + 1}"><span class="h">${esc(hh)}</span>${fmt(cells[i] || '', { noTables: true })}</div>`).join('')}</div>`;
+    return `<div class="tiers" style="grid-template-columns:repeat(${hd.length},1fr)">${hd.map((hh, i) => `<div class="c c${hd.length === 2 ? i + 2 : i + 1}"><span class="h">${esc(hh)}</span>${fmt(cells[i] || '', fo)}</div>`).join('')}</div>`;
   }).join('');
   return `<div class="icard ${c.magic ? 'magic' : ''}">
-    <div class="in">${opts.link ? `<a href="#/item/${c.id}">${esc(c.name)}</a>` : esc(c.name)}${c.stack ? `<span class="stk">Stack ${esc(c.stack)}</span>` : ''}</div>
-    ${itemExtra(c) ? `<div class="ex">${esc(itemExtra(c))}</div>` : ''}
+    <div class="in">${opts.link ? `<a href="#/item/${c.id}">${esc(c.name)}</a>` : esc(c.name)}${c.stack ? `<span class="stk">${rlink('Stack ' + esc(c.stack), 'rules-inventory-slots', 'How many of this item fit in one inventory slot.')}</span>` : ''}</div>
+    ${itemExtra(c) ? `<div class="ex">${c.rank != null ? [c.disc ? rlink(esc(c.disc), 'rules-discipline') : '', c.cast ? rlink(esc(c.cast), 'rules-casting-time') : '', rlink('Rank ' + c.rank, 'rules-rank')].filter(Boolean).join(' · ') : opts.rules !== false ? ruleLinkHTML(esc(itemExtra(c)).replace(/(Occupies \d+ Slots)/, '<i>$1</i>')).replace(/<i>(Occupies \d+ Slots)<\/i>/, (m, x) => rlink(x, 'rules-inventory-slots')) : esc(itemExtra(c))}</div>` : ''}
     ${body}
     <div class="pr">${c.cat ? esc(c.cat) + ' · ' : ''}${esc(c.price || '—')}</div>
     ${opts.noCraft ? '' : craftLine(craftFor(c))}
@@ -381,6 +448,10 @@ function openDrawer(kind, id) {
     const intro = HEAD[t.hid] ? sectionBlocks(t.book, HEAD[t.hid].i).filter(b => b.t === 'p').slice(0, 3) : [];
     body.innerHTML = `<p class="muted sm">${esc(D.books[t.book].title)} · p.${HEAD[t.hid]?.b.page ?? ''}</p>${blocksHTML(intro)}${blocks.map(tableHTML).join('')}<div class="row">${pinBtn('table', id, t.name)}</div>`;
   }
+  else if (kind === 'rule') {
+    const h = HEAD[id]; if (!h) return; title = h.b.text; url = `#/book/${h.book}/${id}`;
+    body.innerHTML = `<p class="muted sm">${esc(D.books[h.book].title)} · p.${h.b.page}</p>${blocksHTML(sectionBlocks(h.book, h.i), { noTrack: true })}<div class="row">${pinBtn('heading', id, h.b.text + ' (' + D.books[h.book].title + ')')}</div>`;
+  }
   else if (kind === 'map') { title = id + ' map'; url = '#/map'; body.innerHTML = `<img src="${MAPS[id]}" style="width:100%;border-radius:8px" alt="${esc(id)} map"><p class="sm"><a href="${MAPS[id]}" target="_blank">Open full size</a></p>`; }
   drawerState = { kind, id, url };
   $('#drawerTitle').textContent = title; $('#drawerOpen').hidden = !url;
@@ -460,7 +531,7 @@ function openQ(e) {
 
 /* ---------------- navigation ---------------- */
 const NAV = [
-  ['Play', [['session', '⏱', 'Session'], ['combat', '⚔', 'Combat'], ['rollers', '🎲', 'Rollers'], ['travel', '🧭', 'Travel day'], ['cheat', '📋', 'Cheat sheet']]],
+  ['Play', [['session', '⏱', 'Session'], ['encounters', '👁', 'Encounters'], ['combat', '⚔', 'Combat'], ['travel', '🧭', 'Travel day'], ['rest', '⛺', 'Rest'], ['rollers', '🎲', 'Rollers'], ['cheat', '📋', 'Cheat sheet']]],
   ['Books', [['book/rules', '📕', 'Rules'], ['book/chars', '📗', 'Characters'], ['book/ref', '📘', 'The Ref'], ['book/dungeons', '🏚', 'Dungeons']]],
   ['Reference', [['monsters', '👹', 'Monsters'], ['items', '🎒', 'Items'], ['spells', '✨', 'Spells'], ['tables', '🎰', 'Random tables'], ['pregens', '🧍', 'Pregens'], ['map', '🗺', 'Map of Cornath'], ['changelog', '📝', 'Changelog']]],
   ['Campaign', [['notes', '✎', 'Notes & roster'], ['settings', '⚙', 'Settings & saves']]],
@@ -484,37 +555,17 @@ function route() {
 function fmtTime(ms) { const neg = ms < 0; ms = Math.abs(ms); const s = Math.round(ms / 1000); return (neg ? '−' : '') + Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); }
 function dtLeft() { return S.dt.running ? S.dt.endAt - Date.now() : S.dt.left; }
 function greed(n) { return n === 1 ? 30 : n === 2 ? 20 : n === 3 ? 10 : 0; }
-function enValue() {
-  const e = S.en; let v;
-  if (e.ctx === 'dungeon' || e.ctx === 'drest') { v = 3 + (e.crowded ? 1 : 0) + (e.chaos ? 1 : 0); if (e.ctx === 'drest' && e.seclude) v -= 1; }
-  else { v = { slow: 2, normal: 4, fast: 6 }[e.pace] + (e.ctx === 'trest' && e.seclude ? -1 : 0) + (e.ctx === 'travel' && e.scout ? -1 : 0); }
-  v += +e.other || 0;
-  return Math.max(1, v);
-}
 VIEWS.session = () => {
-  const encTables = D.tables.filter(t => /^(Angel|Blood|Demon|Plant|Undead) Encounters$|^Any Monster Encounter$|^Travel Encounters$/.test(t.name));
   $('#main').innerHTML = `
   <div class="page-title"><h1>Session</h1><span class="muted">Dungeon turns, encounter checks, usage dice and your notes in one place.</span></div>
   ${(!S.lastExport || Date.now() - S.lastExport > 14 * 864e5) && (S.notes.campaign || S.roster.length || Object.keys(S.progress).length) ? `<div class="notice sm">Your game is saved in this browser only. <a href="#/settings">Export a backup</a> now and then${S.lastExport ? ` (last one: ${new Date(S.lastExport).toLocaleDateString()})` : ''}.</div>` : ''}
   <div class="grid dash">
     <div class="card" id="dtCard"></div>
-    <div class="card">
-      <h3>Encounter check</h3>
-      <div class="row"><select id="enCtx">
-        <option value="dungeon">In a dungeon</option><option value="drest">Resting in a dungeon</option><option value="travel">Overland travel</option><option value="trest">Resting outdoors</option></select>
-        <select id="enPace" title="Travel pace"><option value="slow">Slow pace (EN 2)</option><option value="normal">Normal pace (EN 4)</option><option value="fast">Fast pace (EN 6)</option></select></div>
-      <div class="row" style="margin-top:6px">
-        <label class="chip" data-en="crowded">20+ creatures on level (+1)</label>
-        <label class="chip" data-en="chaos">Trail of chaos / bodies (+1)</label>
-        <label class="chip" data-en="seclude">Seclude Camp (−1)</label>
-        <label class="chip" data-en="scout">Scout for Danger (−1)</label>
-        <span class="sm muted">Other</span><input id="enOther" type="number" style="width:60px" value="${S.en.other || 0}">
-      </div>
-      <p style="margin:10px 0 4px">Encounter number: <b id="enVal" style="font-size:1.4rem"></b> <span class="muted sm">(roll d10 ≤ EN; never below 1)</span></p>
-      <div class="row"><select id="enTable"><option value="">Then roll on… (optional)</option>${encTables.map(t => `<option value="${t.gid}" ${S.en.table === t.gid ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}</select>
-      <button class="btn primary" id="enRoll">Encounter check</button></div>
+    <div class="card" id="sessEnc"><div class="row"><h3 style="margin:0">Encounter check</h3><span class="sp"></span><a class="btn sm" href="#/encounters">Encounter hub →</a></div>
+      ${enControlsHTML()}
+      <button class="btn primary" id="enRoll">Encounter check</button>
       <div id="enOut"></div>
-      <p class="sm muted">On a 1 the encounter happens now. On 2+ give the players a sign (distant roar, fresh corpse, big footprint); it happens during the next DT when you choose.</p>
+      <p class="sm muted">A hit gives you a “Generate it” button that opens the Encounter hub with what they meet, how they react, and their stat blocks.</p>
     </div>
     <div class="card" id="udCard"></div>
     <div class="card"><h3>Pinned &amp; recent</h3><div id="pins" class="pins"></div></div>
@@ -522,36 +573,10 @@ VIEWS.session = () => {
     <div class="card"><h3>Session notes</h3><textarea id="sessNotes" placeholder="What happened, who owes whom, which doors are open…">${esc(S.notes.session)}</textarea></div>
   </div>`;
   renderDT(); renderUD(); renderPins();
-  const sync = () => {
-    $('#enCtx').value = S.en.ctx; $('#enPace').value = S.en.pace;
-    const travel = S.en.ctx === 'travel' || S.en.ctx === 'trest';
-    $('#enPace').style.display = travel ? '' : 'none';
-    $$('[data-en]').forEach(c => {
-      const k = c.dataset.en; c.classList.toggle('on', !!S.en[k]);
-      c.style.display = (k === 'crowded' || k === 'chaos') ? (travel ? 'none' : '') : k === 'seclude' ? (S.en.ctx.includes('rest') ? '' : 'none') : k === 'scout' ? (S.en.ctx === 'travel' ? '' : 'none') : '';
-    });
-    $('#enVal').textContent = enValue();
-  };
-  sync();
-  $('#enCtx').onchange = e => { S.en.ctx = e.target.value; save(); sync(); };
-  $('#enPace').onchange = e => { S.en.pace = e.target.value; save(); sync(); };
-  $('#enOther').oninput = e => { S.en.other = +e.target.value || 0; save(); sync(); };
-  $('#enTable').onchange = e => { S.en.table = e.target.value; save(); };
-  $$('[data-en]').forEach(c => c.onclick = () => { S.en[c.dataset.en] = !S.en[c.dataset.en]; save(); sync(); });
+  bindEnControls($('#sessEnc'));
   $('#enRoll').onclick = () => encounterCheck($('#enOut'));
   $('#sessNotes').oninput = e => { S.notes.session = e.target.value; save(); };
 };
-function encounterCheck(out) {
-  const en = enValue(), d = rnd(10);
-  let html;
-  if (d > en) html = `<b>Encounter check</b> (EN ${en}): rolled ${d} — <span style="color:var(--good)">no encounter.</span>`;
-  else {
-    html = `<b>Encounter check</b> (EN ${en}): rolled ${d} — <span style="color:var(--bad)"><b>ENCOUNTER!</b></span> ${d === 1 ? '<b>It happens immediately.</b>' : 'Give a sign now; it arrives during the next DT.'}`;
-  }
-  addLog(html);
-  if (out) out.innerHTML = `<div class="result">${html}</div>`;
-  if (d <= en && S.en.table) { const r = rollTable(S.en.table); if (out && r) out.innerHTML += `<div class="result">${r.html}</div>`; }
-}
 function renderDT() {
   const c = $('#dtCard'); if (!c) return;
   const n = S.dt.num, left = dtLeft(), g = greed(n);
@@ -571,7 +596,7 @@ function renderDT() {
   const on = (id, f) => { const el = $('#' + id); if (el) el.onclick = f; };
   on('dtStart', () => startDT(1));
   on('dtPause', () => { S.dt.left = dtLeft(); S.dt.running = false; save(); renderDT(); });
-  on('dtResume', () => { S.dt.endAt = Date.now() + S.dt.left; S.dt.running = true; save(); renderDT(); });
+  on('dtResume', () => { S.dt.resting = false; S.dt.endAt = Date.now() + S.dt.left; S.dt.running = true; save(); renderDT(); });
   on('dtEnd', () => showEndDT());
   on('dtLeave', () => { if (confirm('Leave the dungeon and reset the DT counter?')) { S.dt = Object.assign(DEFAULT().dt, { left: S.settings.dtMin * 60000 }); save(); renderDT(); } });
   on('dtMinus', () => adjDT(-60000)); on('dtPlus', () => adjDT(60000));
@@ -581,7 +606,7 @@ function renderDT() {
 }
 function adjDT(d) { if (S.dt.running) S.dt.endAt += d; else S.dt.left += d; save(); tick(); }
 function startDT(n) {
-  S.dt.num = n; S.dt.left = S.settings.dtMin * 60000; S.dt.endAt = Date.now() + S.dt.left; S.dt.running = true; S.dt.pendingEnd = false; S.dt.alerted = 0;
+  S.dt.resting = false; S.dt.num = n; S.dt.left = S.settings.dtMin * 60000; S.dt.endAt = Date.now() + S.dt.left; S.dt.running = true; S.dt.pendingEnd = false; S.dt.alerted = 0;
   if (S.settings.mode === 'rooms') { S.dt.rooms = rnd(6); S.dt.roomsDone = 0; addLog(`<b>DT ${n}</b> lasts <b>${S.dt.rooms}</b> rooms (1d6).`); }
   else addLog(`<b>DT ${n} started</b>${greed(n) ? ` — greed bonus +${greed(n)}%` : ''}`, { quiet: true });
   save(); renderDT(); tick();
@@ -594,13 +619,13 @@ function showEndDT(silent) {
     <ol class="checklist">
       <li>Players roll usage dice for their torches, lanterns, spells and effects.</li>
       <li><button class="btn sm" id="endUD">Roll tracked usage dice (${nUD})</button></li>
-      <li><button class="btn sm" id="endEnc">Encounter check (EN ${S.en.ctx === 'dungeon' ? enValue() : 3 + (S.en.crowded ? 1 : 0) + (S.en.chaos ? 1 : 0)})</button></li>
+      <li><button class="btn sm" id="endEnc">Encounter check (EN ${enValue('dungeon')})</button></li>
       <li><button class="btn sm" id="endConds">Clear blessed / vulnerable / weakened in combat tracker</button> <span class="sm muted">(knocked-out creatures wake now)</span></li>
     </ol>
     <div id="endOut"></div>
     <button class="btn primary" id="endNext">Start DT ${S.dt.num + 1}</button></div>`;
   $('#endUD').onclick = () => { rollAllUD(); renderUD(); };
-  $('#endEnc').onclick = () => { if (S.en.ctx !== 'dungeon') { S.en.ctx = 'dungeon'; save(); } encounterCheck($('#endOut')); };
+  $('#endEnc').onclick = () => { S.en.ctx = 'dungeon'; save(); encounterCheck($('#endOut'), { ctx: 'dungeon' }); };
   $('#endConds').onclick = () => { clearDTConds(); toast('Cleared DT conditions.'); };
   $('#endNext').onclick = () => startDT(S.dt.num + 1);
 }
@@ -618,7 +643,7 @@ function tick() {
   const n = S.dt.num, left = dtLeft();
   const rooms = S.settings.mode === 'rooms';
   const txt = rooms ? `${S.dt.roomsDone}/${S.dt.rooms || '?'}` : fmtTime(left);
-  $('#dtMiniNum').textContent = n || '–'; $('#dtMiniTime').textContent = n ? txt : (rooms ? 'rooms' : fmtTime(S.settings.dtMin * 60000));
+  $('#dtMiniNum').textContent = n || '–'; $('#dtMiniTime').textContent = S.dt.resting ? 'resting' : n ? txt : (rooms ? 'rooms' : fmtTime(S.settings.dtMin * 60000));
   const mini = $('#dtMini'); mini.className = 'dtmini' + (n && S.dt.running ? ' run' : '') + (n && !rooms && left < 5 * 60000 && left > 0 ? ' low' : '') + (n && !rooms && left <= 0 ? ' over' : '');
   const big = $('#dtBig'); if (big) { big.textContent = fmtTime(left); big.className = 'bigtime ' + (left <= 0 && n ? 'over' : left < 5 * 60000 && n ? 'low' : ''); }
   if (!$('#present').hidden) {
@@ -634,17 +659,17 @@ function tick() {
 }
 
 /* usage dice */
-const UD_PRESETS = D.items.map(c => { const m = JSON.stringify(c.body).match(/<b>(?:UD|Duration):?<\/b>:?\s*(\d+)/); return m && c.cat !== 'Spellbook' ? { name: c.name, dice: +m[1] } : null; }).filter(Boolean);
+const UD_PRESETS = D.items.map(c => { const b = JSON.stringify(c.body); const m = b.match(/<b>(?:UD|Duration):?<\/b>:?\s*(\d+)\s*(\([^)]*\))?/); return m ? { name: c.name + (c.cat === 'Spellbook' ? ' (spellbook)' : ''), dice: +m[1], rest: /Rest/.test(m[2] || '') || c.cat === 'Spellbook' } : null; }).filter(Boolean);
 function renderUD() {
   const c = $('#udCard'); if (!c) return;
   c.innerHTML = `<div class="row"><h3 style="margin:0">Usage dice</h3><span class="sp"></span><button class="btn primary sm" id="udAll">Roll all (end of DT)</button></div>
   <p class="sm muted" style="margin:4px 0">Each d6 showing 1–2 is removed. At 0 UD the effect ends or the item is spent.</p>
-  <div id="udList">${S.ud.map(u => `<div class="udrow"><b style="min-width:120px">${esc(u.name)}</b>${u.who ? `<span class="muted sm">${esc(u.who)}</span>` : ''}<span class="dice">${Array.from({ length: Math.max(u.max, u.dice) }, (_, i) => `<span class="die ${i >= u.dice ? 'gone' : ''}">${u.last && u.last[i] ? u.last[i] : ''}</span>`).join('')}</span>${u.dice ? '' : '<span class="badge" style="color:var(--bad)">spent</span>'}<span class="sp"></span>
+  <div id="udList">${S.ud.map(u => `<div class="udrow"><b style="min-width:120px">${esc(u.name)}</b>${u.who ? `<span class="muted sm">${esc(u.who)}</span>` : ''}${u.rest ? '<span class="badge" title="Refilled when a rest finishes">rest</span>' : ''}<span class="dice">${Array.from({ length: Math.max(u.max, u.dice) }, (_, i) => `<span class="die ${i >= u.dice ? 'gone' : ''}">${u.last && u.last[i] ? u.last[i] : ''}</span>`).join('')}</span>${u.dice ? '' : '<span class="badge" style="color:var(--bad)">spent</span>'}<span class="sp"></span>
     <button class="btn sm" data-udroll="${u.id}">Roll</button><button class="btn sm" data-udref="${u.id}" title="Refuel / restore">↺</button><button class="btn sm" data-udplus="${u.id}">+</button><button class="icon-btn" data-uddel="${u.id}" title="Remove">✕</button></div>`).join('') || '<p class="muted">Nothing tracked. Add torches, lanterns, spell durations…</p>'}</div>
-  <div class="row" style="margin-top:8px"><input id="udName" placeholder="Name (e.g. Boris’s torch)" list="udPresets" style="flex:1;min-width:150px"><input id="udN" type="number" min="1" value="1" style="width:56px" title="Usage dice"><input id="udWho" placeholder="Who" style="width:90px"><button class="btn" id="udAdd">Add</button></div>
+  <div class="row" style="margin-top:8px"><input id="udName" placeholder="Name (e.g. Boris’s torch)" list="udPresets" style="flex:1;min-width:150px"><input id="udN" type="number" min="1" value="1" style="width:56px" title="Usage dice"><input id="udWho" placeholder="Who" style="width:90px"><label class="sm" title="Spellbooks and items whose UD say “Rest”"><input type="checkbox" id="udRest"> restores on rest</label><button class="btn" id="udAdd">Add</button></div>
   <datalist id="udPresets">${UD_PRESETS.map(p => `<option value="${esc(p.name)}">${p.dice} UD</option>`).join('')}</datalist>`;
-  $('#udName').oninput = e => { const p = UD_PRESETS.find(p => p.name.toLowerCase() === e.target.value.toLowerCase()); if (p) $('#udN').value = p.dice; };
-  $('#udAdd').onclick = () => { const n = $('#udName').value.trim(); if (!n) return; const d = Math.max(1, +$('#udN').value || 1); S.ud.push({ id: uid(), name: n, dice: d, max: d, who: $('#udWho').value.trim() }); save(); renderUD(); };
+  $('#udName').oninput = e => { const p = UD_PRESETS.find(p => p.name.toLowerCase() === e.target.value.toLowerCase()); if (p) { $('#udN').value = p.dice; $('#udRest').checked = p.rest; } };
+  $('#udAdd').onclick = () => { const n = $('#udName').value.trim(); if (!n) return; const d = Math.max(1, +$('#udN').value || 1); S.ud.push({ id: uid(), name: n, dice: d, max: d, who: $('#udWho').value.trim(), rest: $('#udRest').checked }); save(); renderUD(); };
   $('#udAll').onclick = () => { rollAllUD(); renderUD(); };
 }
 function rollUD(u) {
@@ -663,16 +688,10 @@ function renderPins() {
 }
 
 /* ---------------- combat ---------------- */
-const PHASES = ['Group A fast turns', 'Group B fast turns', 'Group A slow turns', 'Group B slow turns'];
 VIEWS.combat = () => {
   const C = S.combat;
-  $('#main').innerHTML = `<div class="page-title"><h1>Combat</h1><span class="sp"></span><button class="btn" id="cbClear">Clear all</button><button class="btn" id="cbDT">End of DT: clear DT conditions</button></div>
-  <div class="card"><div class="row"><h3 style="margin:0">Round ${C.round || '—'}</h3>
-    <span id="cbGroups" class="muted">${C.pcsFirst == null ? 'Roll at the start of each round: 6+ on a d10 means the PCs are Group A.' : `<b>${C.pcsFirst ? 'PCs' : 'Enemies'}</b> are Group A this round (rolled ${C.lastRoll}).`}</span><span class="sp"></span>
-    <button class="btn primary" id="cbRound">${C.round ? 'Next round' : 'Start combat'} (roll d10)</button></div>
-    <div class="phase" style="margin-top:8px">${PHASES.map((p, i) => `<span class="${C.round && C.phase === i ? 'on' : ''}" data-phase="${i}">${i + 1}. ${p.replace('Group A', C.pcsFirst == null ? 'Group A' : C.pcsFirst ? 'PCs' : 'Enemies').replace('Group B', C.pcsFirst == null ? 'Group B' : C.pcsFirst ? 'Enemies' : 'PCs')}</span>`).join('')}<button class="btn sm" id="cbPhase">Next phase →</button></div>
-    <p class="sm muted" style="margin:6px 0 0">Fast turn: a maneuver <i>or</i> an action. Slow turn: maneuver + action, or two maneuvers. Surprised creatures skip round 1.</p>
-  </div>
+  $('#main').innerHTML = `<div class="page-title"><h1>Combat</h1><span class="sp"></span><a class="btn" href="#/encounters">Encounter hub</a><button class="btn" id="cbClear">Clear all</button><button class="btn" id="cbDT">End of DT: clear DT conditions</button></div>
+  <div class="card" id="cbRoundCard">${roundBarHTML()}</div>
   <div class="card" style="margin-top:12px"><div class="row">
     <input id="cbMon" list="monList" placeholder="Add monster / NPC / animal…" style="flex:1;min-width:200px"><input id="cbCount" type="number" value="1" min="1" style="width:56px" title="How many"><button class="btn primary" id="cbAddMon">Add</button>
     <span class="sp"></span><input id="cbPC" placeholder="PC or ally name" list="rosterList" style="width:160px"><button class="btn" id="cbAddPC">Add PC</button>${S.roster.length ? `<button class="btn" id="cbRoster">Add whole roster</button>` : ''}
@@ -681,11 +700,9 @@ VIEWS.combat = () => {
   <datalist id="rosterList">${S.roster.map(r => `<option value="${esc(r.name)}">`).join('')}</datalist></div>
   <div id="cbList"></div>`;
   renderCombatList();
-  $('#cbRound').onclick = () => { const d = rnd(10); C.round++; C.pcsFirst = d >= 6; C.lastRoll = d; C.phase = 0; C.list.forEach(c => { if (C.round > 1) c.conds = (c.conds || []).filter(x => x !== 'surprised'); }); addLog(`<b>Round ${C.round}</b>: d10 = ${d} → <b>${C.pcsFirst ? 'PCs' : 'Enemies'}</b> are Group A`); save(); VIEWS.combat(); };
-  $('#cbPhase').onclick = () => { if (!C.round) return; C.phase = (C.phase + 1) % 4; save(); VIEWS.combat(); };
-  $$('[data-phase]').forEach(s => s.onclick = () => { C.phase = +s.dataset.phase; save(); VIEWS.combat(); });
+  bindRoundBar($('#cbRoundCard'), VIEWS.combat);
   $('#cbAddMon').onclick = () => {
-    const m = MON_BY_NAME[norm($('#cbMon').value)]; if (!m) { toast('Pick a creature from the list.'); return; }
+    const m = MON_BY_NAME[norm($('#cbMon').value)] || resolveMon($('#cbMon').value); if (!m) { toast('Pick a creature from the list.'); return; }
     addCombatant(m, +$('#cbCount').value || 1); $('#cbMon').value = ''; renderCombatList();
   };
   $('#cbMon').onkeydown = e => { if (e.key === 'Enter') $('#cbAddMon').click(); };
@@ -694,51 +711,315 @@ VIEWS.combat = () => {
   $('#cbClear').onclick = () => { if (confirm('Remove all combatants and reset rounds?')) { S.combat = DEFAULT().combat; save(); VIEWS.combat(); } };
   $('#cbDT').onclick = () => { clearDTConds(); renderCombatList(); toast('Blessed, vulnerable and weakened cleared.'); };
 };
-function addCombatant(m, n = 1) {
+
+/* ---------------- encounter numbers (shared by Session, Encounters, Travel, Rest) ---------------- */
+function travelBaseEN() { return { slow: 2, normal: 4, fast: 6 }[S.travel.pace] || 4; }
+function enValue(ctx = S.en.ctx) {
+  const e = S.en; let v;
+  if (ctx === 'dungeon' || ctx === 'drest') { v = 3 + (e.crowded ? 1 : 0) + (e.chaos ? 1 : 0); if (ctx === 'drest' && e.seclude) v -= 1; }
+  else { const tc = travelCalc(); v = ctx === 'trest' ? tc.restEn - (e.seclude ? 1 : 0) : tc.en; }
+  v += +e.other || 0;
+  return Math.max(1, v);
+}
+const CTX_LABEL = { dungeon: 'In a dungeon', drest: 'Resting in a dungeon', travel: 'Travel day', trest: 'Resting outdoors' };
+function enControlsHTML() {
+  return `<div class="row">${Object.entries(CTX_LABEL).map(([k, l]) => `<span class="chip ${S.en.ctx === k ? 'on' : ''}" data-enctx="${k}">${l}</span>`).join('')}</div>
+    <div class="row" style="margin-top:6px" id="enMods"></div>
+    <p style="margin:8px 0 4px">Encounter number: <b class="enVal" style="font-size:1.4rem"></b> <span class="muted sm" id="enWhy"></span></p>`;
+}
+function bindEnControls(root, onChange) {
+  const draw = () => {
+    const c = S.en.ctx, dung = c === 'dungeon' || c === 'drest';
+    $$('[data-enctx]', root).forEach(x => x.classList.toggle('on', x.dataset.enctx === c));
+    $('#enMods', root).innerHTML = (dung ? `<span class="chip ${S.en.crowded ? 'on' : ''}" data-en="crowded">20+ creatures on this level (+1)</span><span class="chip ${S.en.chaos ? 'on' : ''}" data-en="chaos">Trail of chaos or bodies (+1)</span>` : '')
+      + (c === 'drest' || c === 'trest' ? `<span class="chip ${S.en.seclude ? 'on' : ''}" data-en="seclude">Seclude Camp (−1)</span>` : '')
+      + `<span class="sm muted">Other</span><input type="number" data-enother style="width:56px" value="${S.en.other || 0}">`;
+    $$('.enVal', root).forEach(x => x.textContent = enValue());
+    const tc = travelCalc();
+    $('#enWhy', root).innerHTML = dung ? 'base 3, max 5 · roll d10 ≤ EN' : c === 'travel' ? `from <a href="#/travel">Travel day</a>: ${S.travel.pace} pace + roles${tc.extra ? ` · ${tc.extra} extra check${tc.extra > 1 ? 's' : ''}` : ''}` : `rest EN from <a href="#/travel">Travel day</a> pace${tc.extraRest ? ` · ${tc.extraRest} extra check` : ''}`;
+    $$('[data-en]', root).forEach(x => x.onclick = () => { S.en[x.dataset.en] = !S.en[x.dataset.en]; save(); draw(); onChange && onChange(); });
+    const o = $('[data-enother]', root); if (o) o.oninput = () => { S.en.other = +o.value || 0; save(); $$('.enVal', root).forEach(x => x.textContent = enValue()); onChange && onChange(); };
+  };
+  $$('[data-enctx]', root).forEach(x => x.onclick = () => { S.en.ctx = x.dataset.enctx; save(); draw(); onChange && onChange(); });
+  draw();
+}
+function encounterCheck(out, opts = {}) {
+  const ctx = opts.ctx || S.en.ctx, en = enValue(ctx), d = rnd(10), hit = d <= en;
+  const label = opts.label || 'Encounter check';
+  const html = hit
+    ? `<b>${esc(label)}</b> (EN ${en}): rolled ${d} — <span style="color:var(--bad)"><b>ENCOUNTER!</b></span> ${ctx === 'dungeon' || ctx === 'drest' ? (d === 1 ? '<b>It happens now.</b>' : 'Give a sign now; it arrives during the next DT.') : 'You choose when it happens today.'} <button class="btn sm primary" data-gen="${ctx}">Generate it →</button>`
+    : `<b>${esc(label)}</b> (EN ${en}): rolled ${d} — <span style="color:var(--good)">no encounter.</span>`;
+  addLog(html, { quiet: !!opts.quiet });
+  if (out) out.innerHTML = (opts.append ? out.innerHTML : '') + `<div class="result">${html}</div>`;
+  return { d, en, hit };
+}
+
+/* ---------------- encounter generation ---------------- */
+const TB = n => D.tables.find(t => t.name === n);
+const MON_TABLES = { Angel: 'Angel Encounters', Blood: 'Blood Encounters', Demon: 'Demon Encounters', Plant: 'Plant Encounters', Undead: 'Undead Encounters' };
+const HABITATS = { Coastal: 'Coastal Animal Encounters', 'Cold climate': 'Cold Climate Animal Encounters', Desert: 'Desert Animal Encounters', Forest: 'Forest Animal Encounters', Grassland: 'Grassland Animal Encounters', 'Hill / mountain': 'Hill/Mountain Animal Encounters', 'Marsh / swamp': 'Marsh/Swamp Animal Encounters' };
+const WEATHER = { 'Cold or winter': ['Blizzard', 'Cold Snap'], Desert: ['Heat Wave', 'Sandstorm'], Fall: ['Rain', 'Thunderstorm'], Spring: ['Rain', 'Thunderstorm'], 'Tropical or summer': ['Heat Wave', 'Thunderstorm'] };
+const MERCH_NPC = { Alchemist: 'Alchemist', Blacksmith: 'Blacksmith', Bookseller: 'Sage (Power 6)', Enchanter: 'Enchanter', 'General Store': 'Commoner' };
+const KIND_HELP = {
+  'Any Monster': 'Roll which monster table, then who shows up. You decide what they’re doing, or use the behavior roll.',
+  'Nearby Monster': 'Monsters from the closest dungeon’s table (set “Nearest dungeon’s monsters” above).',
+  'Bad Weather': 'Lasts 24 hours. Depends on climate or season (set above).',
+  'Merchant': 'A caravan that trades like an institution. 1d6 guards per PC travel with it — only place them if you need to.',
+  'Miasma-Touched': '1d6 humans permanently corrupted by the Miasma. Their reaction is a prompt — put your own spin on it.',
+  'Strong Miasma': 'No encounter if the PCs avoid Miasma hexes today thanks to an upgraded beacon.',
+  'Traveler': '1d10 humans on the road. Cautious until the PCs prove they’re kind.',
+  'Wild Animal': 'Roll on the habitat’s table (set above), then the animal’s reaction.',
+};
+function wordsKey(s) { return norm(s).replace(/[(),]/g, ' ').split(/\s+/).filter(Boolean).sort().join(' '); }
+const MON_WORDS = D.monsters.map(m => [m, wordsKey(m.name)]);
+function singular(w) { return w.replace(/^oxen$/, 'ox').replace(/^mice$/, 'mouse').replace(/^geese$/, 'goose').replace(/wolves$/, 'wolf').replace(/ies$/, 'y').replace(/(ch|sh|ss|x)es$/, '$1').replace(/([^s])s$/, '$1'); }
+function resolveMon(name) {
+  const n = norm(name).replace(/^(the|a|an)\s+/, '').replace(/[.;]$/, '');
+  const lt = n.match(/^(angels?|blood creatures?|demons?|plants?|undead)\s+([a-j])$/i);
+  if (lt) { const id = monIdForLettered(lt[1], lt[2]); if (id) return MON[id]; }
+  const w = n.replace(/[(),]/g, ' ').split(/\s+/).filter(Boolean);
+  for (const v of [w, w.map(singular), w.map((x, i) => i === w.length - 1 ? singular(x) : x)]) {
+    const k = [...v].sort().join(' '); const hit = MON_WORDS.find(x => x[1] === k); if (hit) return hit[0];
+  }
+  return null;
+}
+function parseComp(text) {
+  const out = [], unknown = [];
+  for (const part of strip(text).replace(/\.$/, '').split(/\s+and\s+|,\s*/)) {
+    const p = part.trim(); if (!p) continue;
+    const m = p.match(/^(\d+d\d+(?:\s*[+]\s*\d+)?|\d+)\s+(.+)$/i);
+    const mon = resolveMon(m ? m[2] : p);
+    if (mon) out.push({ expr: m ? m[1].replace(/\s/g, '') : '1', mid: mon.id }); else unknown.push(p);
+  }
+  return { out, unknown };
+}
+function tRoll(name) {
+  const t = TB(name); if (!t) return null;
+  const r = rollTable(t.gid, { quiet: true });
+  return { gid: t.gid, name: t.name, die: r.die, cells: r.res ? r.res.c : [], txt: r.res ? strip(r.res.c[0]) : '' };
+}
+function mkStep(k, label, r, extra = '') { return { k, label, gid: r?.gid, die: r?.die, html: r ? r.cells.filter(c => strip(c)).map(c => fmt(c, { selfTable: r.gid })).join(' — ') : '', extra }; }
+function encTitle(E) { return E.kind || (E.groups.length ? E.groups.map(g => `${g.count} × ${MON[g.mid]?.name}`).join(', ') : 'Encounter'); }
+
+function genEncounter(ctx) {
+  const old = S.enc.cur;
+  if (old) { S.combat.list = S.combat.list.filter(c => c.enc !== old.id); S.enc.history = [{ at: old.at, ctx: old.ctx, title: encTitle(old), disp: old.disp ? strip(old.disp.html).slice(0, 90) : '' }, ...(S.enc.history || [])].slice(0, 12); }
+  const E = { id: uid(), at: Date.now(), ctx, steps: [], groups: [], unknown: [], disp: null, notes: [], kind: '' };
+  S.enc.cur = E;
+  if (ctx === 'dungeon' || ctx === 'drest') { E.kind = (S.enc.dtype === 'Any' ? 'Monsters' : S.enc.dtype + ' monsters') + ' (dungeon)'; genMonsters(E, S.enc.dtype, true); }
+  else {
+    const k = tRoll('Travel Encounters'); E.kind = k.txt.replace(/^Nearby Monster$/, 'Nearby Monster');
+    E.steps.push(mkStep('kind', 'What kind of encounter?', k, KIND_HELP[E.kind] || ''));
+    genKind(E);
+  }
+  placeCreatures(E);
+  save();
+  addLog(`<b>Encounter</b>: ${esc(encTitle(E))}${E.groups.length ? ' — ' + E.groups.map(g => `${g.count} × ${esc(MON[g.mid].name)}`).join(', ') : ''}${E.disp ? '<br>' + strip(E.disp.html).slice(0, 140) : ''}`, { quiet: true });
+}
+function genMonsters(E, type, inDungeon) {
+  let t = type;
+  if (type === 'Any') { const a = tRoll('Any Monster Encounter'); E.steps.push(mkStep('type', 'Which monster table?', a)); t = (a.txt.match(/^(Angel|Blood|Demon|Plant|Undead)/) || [])[1] || 'Angel'; }
+  E.compTable = MON_TABLES[t]; rollComp(E);
+  E.dispTable = 'Monster Outdoor Behaviors';
+  if (!inDungeon) rollDisp(E);
+  else E.notes.push('In a dungeon you decide what the monsters are doing. You can still roll an outdoor behavior for ideas.');
+}
+function genKind(E) {
+  const k = E.kind;
+  if (k === 'Any Monster') genMonsters(E, 'Any', false);
+  else if (k === 'Nearby Monster') genMonsters(E, S.enc.nearby || 'Undead', false);
+  else if (k === 'Wild Animal') { E.compTable = HABITATS[S.enc.habitat] || HABITATS.Forest; rollComp(E); E.dispTable = 'Wild Animal Reaction'; rollDisp(E); }
+  else if (k === 'Miasma-Touched') { E.compMulti = { table: 'Miasma-Touched Humans', die: 6 }; rollComp(E); E.dispTable = 'Miasma-Touched Encounters'; rollDisp(E); }
+  else if (k === 'Traveler') { E.compMulti = { table: 'Travelers', die: 10 }; rollComp(E); E.dispTable = 'Traveler Encounters'; rollDisp(E); E.extras = ['Traveler Rewards']; }
+  else if (k === 'Merchant') {
+    const s = tRoll('Merchant Sales'); const inst = strip(s.cells[0]), lvl = strip(s.cells[1] || '');
+    E.steps.push(mkStep('comp', 'What does the merchant trade?', s));
+    const npc = MERCH_NPC[inst]; if (npc) { const m = resolveMon(npc); if (m) E.groups = [{ mid: m.id, expr: '1', count: 1 }]; }
+    const pct = rnd(10) * 10;
+    E.disp = { k: 'disp', label: 'Prices', html: `Sells as a <b>${esc(lvl)}-level ${esc(inst)}</b> (see Village in Characters). Buys the PCs’ goods at <b>${pct}%</b> of their value (1d10 × 10%).` };
+    E.extras = ['guards'];
+  }
+  else if (k === 'Bad Weather') {
+    const cl = S.enc.climate || 'Spring'; const opts = WEATHER[cl]; const d = rnd(10); const w = opts[d % 2 ? 0 : 1];
+    E.steps.push({ k: 'comp', label: `Which weather? (${cl}: ${opts.join(' or ')})`, die: `any die: ${d} (${d % 2 ? 'odd → first' : 'even → second'})`, html: `<b>${esc(w)}</b>` });
+    const h = HEAD['ref-' + slugJS(w)]; E.rule = h ? h.b.id : null; E.weather = w;
+  }
+  else if (k === 'Strong Miasma') { E.rule = 'ref-strong-miasma'; }
+}
+function slugJS(s) { return strip(s).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, ''); }
+function rollComp(E) {
+  E.steps = E.steps.filter(s => s.k !== 'comp');
+  if (E.compMulti) {
+    const n = rnd(E.compMulti.die); const lines = []; const tally = {};
+    for (let i = 0; i < n; i++) { const r = tRoll(E.compMulti.table); const m = resolveMon(r.txt); lines.push(`${r.die} ${esc(r.txt)}`); if (m) tally[m.id] = (tally[m.id] || 0) + 1; }
+    E.groups = Object.entries(tally).map(([mid, c]) => ({ mid, expr: String(c), count: c }));
+    E.steps.push({ k: 'comp', label: `Who? (1d${E.compMulti.die} = ${n} ${n === 1 ? 'person' : 'people'}, each rolled on ${E.compMulti.table})`, gid: TB(E.compMulti.table).gid, die: '', html: lines.join(' · ') });
+  } else {
+    const r = tRoll(E.compTable); const pc = parseComp(r.txt);
+    E.groups = pc.out.map(g => { const rr = rollExpr(g.expr); return { mid: g.mid, expr: g.expr, count: Math.max(1, rr.total), roll: /d/.test(g.expr) ? rr.text : '' }; });
+    E.unknown = pc.unknown;
+    E.steps.push(mkStep('comp', 'Who shows up?', r, E.groups.filter(g => g.roll).map(g => `${g.expr} → ${g.count}`).join(', ')));
+  }
+}
+function rollDisp(E) { const r = tRoll(E.dispTable); E.disp = mkStep('disp', E.dispTable === 'Wild Animal Reaction' ? 'How does it react?' : E.dispTable === 'Monster Outdoor Behaviors' ? 'What are they doing?' : 'What do they want?', r); }
+function placeCreatures(E) {
+  S.combat.list = S.combat.list.filter(c => c.enc !== E.id);
+  for (const g of E.groups) { const m = MON[g.mid]; if (m) addCombatant(m, g.count, { enc: E.id, quiet: true }); }
+}
+
+/* ---------------- reusable combatant tracker ---------------- */
+function addCombatant(m, n = 1, opts = {}) {
   const same = S.combat.list.filter(c => c.mid === m.id).length;
   const ad = parseInt(m.ad) || 0, sta = parseInt(m.stamina) || 0;
-  for (let i = 0; i < n; i++) S.combat.list.push({ id: uid(), mid: m.id, name: m.name + (n > 1 || same ? ' #' + (same + i + 1) : ''), sta, staMax: sta, ad, adMax: ad, conds: [] });
-  save(); toast(`Added ${n} × ${esc(m.name)} to combat.`);
+  for (let i = 0; i < n; i++) S.combat.list.push({ id: uid(), mid: m.id, enc: opts.enc, name: m.name + (n > 1 || same ? ' #' + (same + i + 1) : ''), sta, staMax: sta, ad, adMax: ad, conds: [] });
+  save(); if (!opts.quiet) toast(`Added ${n} × ${esc(m.name)} to combat.`);
 }
-function renderCombatList() {
-  const el = $('#cbList'); if (!el) return;
-  const L = S.combat.list;
-  el.innerHTML = L.length ? L.map(c => {
-    const m = c.mid ? MON[c.mid] : null; const dead = !c.pc && c.staMax && c.sta <= 0;
-    return `<div class="cb ${dead ? 'dead' : ''}" data-cb="${c.id}">
-      <div class="row"><b>${esc(c.name)}</b>${c.pc ? '<span class="badge">PC</span>' : m ? `<span class="badge">Power ${esc(m.power)}</span>` : ''}
-        ${m ? `<a class="sm mlink" data-m="${m.id}">stat block</a>` : ''}<span class="sp"></span>
-        <span>Stamina <input class="num" type="number" data-f="sta" value="${c.sta}"> / <input class="num" type="number" data-f="staMax" value="${c.staMax}"></span>
-        <span>AD <input class="num" type="number" data-f="ad" value="${c.ad}"> / <input class="num" type="number" data-f="adMax" value="${c.adMax}"></span>
-        <button class="icon-btn" data-cbdel="${c.id}" title="Remove">✕</button></div>
-      <div class="row" style="margin-top:6px"><input class="num" type="number" placeholder="dmg" data-dmgin><button class="btn sm" data-dmg="n">Damage</button><button class="btn sm" data-dmg="p">Piercing</button><button class="btn sm" data-dmg="h">Heal</button>
-        <div class="conds">${COND_NAMES.map(k => `<span class="chip ${(c.conds || []).includes(k) ? 'on' : ''}" data-cond="${k}" title="${esc(CONDS[k]?.text || '')}">${k}</span>`).join('')}</div>
-        <input placeholder="note" data-f="note" value="${esc(c.note || '')}" style="flex:1;min-width:120px"></div>
-      ${dead ? '<div class="sm" style="color:var(--bad)">0 Stamina — monsters die (or are knocked out if you allow it).</div>' : ''}
-      ${!c.pc && c.staMax && c.sta <= 0 ? '' : ''}
-    </div>`;
-  }).join('') : '<p class="muted" style="margin-top:12px">No combatants yet. Add monsters from the list above, or use “+ Add to combat” on any stat block.</p>';
-  $$('.cb').forEach(row => {
-    const c = L.find(x => x.id === row.dataset.cb);
-    $$('[data-f]', row).forEach(inp => inp.onchange = () => { c[inp.dataset.f] = inp.type === 'number' ? (inp.value === '' ? '' : +inp.value) : inp.value; save(); if (inp.dataset.f !== 'note') renderCombatList(); });
-    $$('[data-cond]', row).forEach(ch => ch.onclick = () => { const k = ch.dataset.cond; c.conds = c.conds || []; c.conds = c.conds.includes(k) ? c.conds.filter(x => x !== k) : [...c.conds, k]; save(); renderCombatList(); });
+function combatantHTML(c) {
+  const m = c.mid ? MON[c.mid] : null; const dead = !c.pc && c.staMax && c.sta <= 0;
+  const pct = c.staMax ? Math.max(0, Math.min(100, Math.round((+c.sta || 0) / +c.staMax * 100))) : 0;
+  return `<div class="cb ${dead ? 'dead' : ''}" data-cb="${c.id}">
+    <div class="row"><b>${esc(c.name)}</b>${c.pc ? '<span class="badge">PC</span>' : m ? `<span class="badge">Power ${esc(m.power)}</span>` : ''}
+      ${m ? `<a class="sm mlink" data-m="${m.id}">stat block</a>` : ''}<span class="sp"></span>
+      <span>Stamina <input class="num" type="number" data-f="sta" value="${c.sta}"> / <input class="num" type="number" data-f="staMax" value="${c.staMax}"></span>
+      <span>AD <input class="num" type="number" data-f="ad" value="${c.ad}"> / <input class="num" type="number" data-f="adMax" value="${c.adMax}"></span>
+      <button class="icon-btn" data-cbdel="${c.id}" title="Remove">✕</button></div>
+    ${c.staMax ? `<div class="hpbar"><div style="width:${pct}%"></div></div>` : ''}
+    <div class="row" style="margin-top:6px"><input class="num" type="number" placeholder="dmg" data-dmgin><button class="btn sm" data-dmg="n">Damage</button><button class="btn sm" data-dmg="p" title="Piercing: ignores AD">Piercing</button><button class="btn sm" data-dmg="h">Heal</button>
+      <div class="conds">${COND_NAMES.map(k => `<span class="chip ${(c.conds || []).includes(k) ? 'on' : ''}" data-cond="${k}" title="${esc(CONDS[k]?.text || '')}">${k}</span>`).join('')}</div>
+      <input placeholder="note" data-f="note" value="${esc(c.note || '')}" style="flex:1;min-width:120px"></div>
+    ${m && m.atkFix.length && !dead ? `<div class="row atkbtns">${m.atkFix.map((a, i) => `<button class="btn sm" data-atkb="${m.id}" data-i="${i}" title="${esc(a.r)} · ${esc(a.t2)} / ${esc(a.t3)}">⚔ ${esc(a.n.replace(/\*+$/, ''))}</button>`).join('')}</div>` : ''}
+    ${dead ? '<div class="sm" style="color:var(--bad)">0 Stamina — monsters die (or are knocked out if you allow it).</div>' : ''}
+  </div>`;
+}
+function renderCombatants(el, filter, rerender) {
+  if (!el) return;
+  const L = S.combat.list.filter(filter);
+  el.innerHTML = L.map(combatantHTML).join('') || '';
+  $$('.cb', el).forEach(row => {
+    const c = S.combat.list.find(x => x.id === row.dataset.cb); if (!c) return;
+    $$('[data-f]', row).forEach(inp => inp.onchange = () => { c[inp.dataset.f] = inp.type === 'number' ? (inp.value === '' ? '' : +inp.value) : inp.value; save(); if (inp.dataset.f !== 'note') rerender(); });
+    $$('[data-cond]', row).forEach(ch => ch.onclick = () => { const k = ch.dataset.cond; c.conds = c.conds || []; c.conds = c.conds.includes(k) ? c.conds.filter(x => x !== k) : [...c.conds, k]; save(); rerender(); });
     $$('[data-dmg]', row).forEach(b => b.onclick = () => {
-      let v = +$('[data-dmgin]', row).value || 0; if (!v) return;
+      const raw = +$('[data-dmgin]', row).value || 0; let v = raw; if (!v) return;
       const kind = b.dataset.dmg;
       if (kind === 'h') { c.sta = Math.min(+c.staMax || Infinity, (+c.sta || 0) + v); }
       else {
         if ((c.conds || []).includes('vulnerable')) { const extra = rnd(6); v += extra; toast(`Vulnerable: +${extra} dam (1d6)`); }
         let msg = '';
         if (kind === 'n' && +c.ad > 0) { const a = Math.min(+c.ad, v); c.ad = +c.ad - a; v -= a; msg = `AD −${a}`; }
-        const before = +c.sta || 0; c.sta = Math.max(0, before - v);
-        const over = v - before;
-        addLog(`${esc(c.name)} takes ${+$('[data-dmgin]', row).value}${kind === 'p' ? ' P' : ''} dam → ${msg ? msg + ', ' : ''}Stamina ${c.sta}${c.pc && over > 0 ? ` · <b>${over} wound${over > 1 ? 's' : ''}</b>` : ''}`, { quiet: true });
+        const before = +c.sta || 0; c.sta = Math.max(0, before - v); const over = v - before;
+        addLog(`${esc(c.name)} takes ${raw}${kind === 'p' ? ' P' : ''} dam → ${msg ? msg + ', ' : ''}Stamina ${c.sta}${c.pc && over > 0 ? ` · <b>${over} wound${over > 1 ? 's' : ''}</b>` : ''}${!c.pc && c.sta <= 0 ? ' · <b>down</b>' : ''}`, { quiet: true });
       }
-      save(); renderCombatList();
+      save(); rerender();
     });
-    $('[data-cbdel]', row).onclick = () => { S.combat.list = L.filter(x => x.id !== c.id); save(); renderCombatList(); };
+    $('[data-cbdel]', row).onclick = () => { S.combat.list = S.combat.list.filter(x => x.id !== c.id); save(); rerender(); };
   });
 }
+function renderCombatList() { renderCombatants($('#cbList'), () => true, renderCombatList); if ($('#cbList') && !S.combat.list.length) $('#cbList').innerHTML = '<p class="muted" style="margin-top:12px">No combatants yet. Add monsters above, roll an encounter in the <a href="#/encounters">Encounter hub</a>, or use “+ Add to combat” on any stat block.</p>'; }
+
+const PHASES = ['Group A fast turns', 'Group B fast turns', 'Group A slow turns', 'Group B slow turns'];
+function roundBarHTML() {
+  const C = S.combat;
+  const nm = (s) => s.replace('Group A', C.pcsFirst == null ? 'Group A' : C.pcsFirst ? 'PCs' : 'Enemies').replace('Group B', C.pcsFirst == null ? 'Group B' : C.pcsFirst ? 'Enemies' : 'PCs');
+  return `<div class="row"><b>Round ${C.round || '—'}</b>
+    <span class="muted sm">${C.pcsFirst == null ? 'Roll each round: 6+ on a d10 means the PCs are Group A.' : `<b>${C.pcsFirst ? 'PCs' : 'Enemies'}</b> are Group A this round (rolled ${C.lastRoll}).`}</span><span class="sp"></span>
+    <button class="btn primary sm" data-rb="round">${C.round ? 'Next round' : 'Start combat'} (d10)</button></div>
+    <div class="phase" style="margin-top:6px">${PHASES.map((p, i) => `<span class="${C.round && C.phase === i ? 'on' : ''}" data-phase="${i}">${i + 1}. ${nm(p)}</span>`).join('')}<button class="btn sm" data-rb="phase">Next phase →</button></div>
+    <p class="sm muted" style="margin:6px 0 0">Fast turn: a maneuver <i>or</i> an action. Slow turn: maneuver + action, or two maneuvers. Surprised creatures skip round 1.</p>`;
+}
+function bindRoundBar(root, rerender) {
+  const C = S.combat;
+  $$('[data-rb="round"]', root).forEach(b => b.onclick = () => { const d = rnd(10); C.round++; C.pcsFirst = d >= 6; C.lastRoll = d; C.phase = 0; if (C.round > 1) C.list.forEach(c => c.conds = (c.conds || []).filter(x => x !== 'surprised')); addLog(`<b>Round ${C.round}</b>: d10 = ${d} → <b>${C.pcsFirst ? 'PCs' : 'Enemies'}</b> are Group A`); save(); rerender(); });
+  $$('[data-rb="phase"]', root).forEach(b => b.onclick = () => { if (!C.round) return; C.phase = (C.phase + 1) % 4; save(); rerender(); });
+  $$('[data-phase]', root).forEach(s => s.onclick = () => { C.phase = +s.dataset.phase; save(); rerender(); });
+}
+
+/* ---------------- views: encounter hub ---------------- */
+VIEWS.encounters = () => {
+  const go = S.enc.autogen; S.enc.autogen = null;
+  if (go) { S.en.ctx = go; genEncounter(go); }
+  const E = S.enc.cur;
+  const sel = (id, opts, val) => `<select id="${id}">${opts.map(o => `<option ${o === val ? 'selected' : ''}>${esc(o)}</option>`).join('')}</select>`;
+  const dung = S.en.ctx === 'dungeon' || S.en.ctx === 'drest';
+  $('#main').innerHTML = `<div class="page-title"><h1>Encounters</h1><span class="muted">Check → who and what they want → stat blocks with health, all on one screen.</span></div>
+  <div class="grid enc-top">
+    <div class="card" id="encCheck"><h3><span class="stepn">1</span>Encounter check</h3>${enControlsHTML()}
+      <div class="kv sm" style="margin:6px 0">
+        ${dung ? `<span>Dungeon’s monsters</span>${sel('encD', ['Any', 'Angel', 'Blood', 'Demon', 'Plant', 'Undead'], S.enc.dtype)}` :
+      `<span>Habitat (animals)</span>${sel('encH', Object.keys(HABITATS), S.enc.habitat)}
+        <span>Nearest dungeon’s monsters</span>${sel('encN', ['Angel', 'Blood', 'Demon', 'Plant', 'Undead'], S.enc.nearby)}
+        <span>Climate / season (weather)</span>${sel('encW', Object.keys(WEATHER), S.enc.climate)}
+        <span>PCs in the party</span><input id="encP" type="number" min="1" value="${S.enc.party}" style="width:60px">`}
+      </div>
+      <div class="row"><button class="btn primary" id="encRoll">Encounter check</button><button class="btn" id="encGen">Skip the check — generate one</button></div>
+      <div id="encOut"></div>
+      <p class="sm muted" style="margin-bottom:0">${dung ? 'Dungeon: check at the end of every DT and whenever the PCs make a racket. Rolling a 1 means it happens now.' : 'Travel: two checks per travel day, plus any extras from roles. Resting outdoors: one check (plus Scout for Shelter extras).'}</p>
+    </div>
+    <div class="card" id="encWhat"></div>
+  </div>
+  <div id="encWho"></div>
+  ${(S.enc.history || []).length ? `<details class="card" style="margin-top:12px"><summary class="muted">Earlier encounters (${S.enc.history.length})</summary>${S.enc.history.map(h => `<div class="sm" style="padding:3px 0;border-bottom:1px solid #23272c">${new Date(h.at).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })} · <b>${esc(h.title)}</b> <span class="muted">${esc(h.disp)}</span></div>`).join('')}</details>` : ''}`;
+  bindEnControls($('#encCheck'), () => VIEWS.encounters());
+  const on = (id, f) => { const el = $('#' + id); if (el) el.onchange = el.oninput = f; };
+  on('encD', e => { S.enc.dtype = e.target.value; save(); });
+  on('encH', e => { S.enc.habitat = e.target.value; save(); });
+  on('encN', e => { S.enc.nearby = e.target.value; save(); });
+  on('encW', e => { S.enc.climate = e.target.value; save(); });
+  on('encP', e => { S.enc.party = Math.max(1, +e.target.value || 1); save(); });
+  $('#encRoll').onclick = () => { const r = encounterCheck($('#encOut'), { quiet: true }); if (r.hit) { genEncounter(S.en.ctx); renderEncWhat(); renderEncWho(); } };
+  $('#encGen').onclick = () => { genEncounter(S.en.ctx); renderEncWhat(); renderEncWho(); };
+  renderEncWhat(); renderEncWho();
+};
+function renderEncWhat() {
+  const el = $('#encWhat'); if (!el) return; const E = S.enc.cur;
+  if (!E) { el.innerHTML = `<h3><span class="stepn">2</span>What is it?</h3><p class="muted">Make an encounter check. When one hits, this panel rolls what the PCs meet and how they react, then puts the stat blocks with health trackers below.</p>`; return; }
+  const stepRow = s => `<div class="encstep"><div class="row"><span class="sm muted">${esc(s.label)}</span><span class="sp"></span>${s.gid ? `<span class="faint sm">${esc(String(s.die ?? ''))}</span> <span class="tlink sm" data-t="${s.gid}">table</span>` : s.die ? `<span class="faint sm">${esc(String(s.die))}</span>` : ''}${s.k === 'comp' || s.k === 'disp' ? ` <button class="icon-btn sm" data-reroll="${s.k}" title="Reroll just this">↻</button>` : ''}</div><div>${s.html}${s.extra ? `<div class="sm muted">${esc(s.extra)}</div>` : ''}</div></div>`;
+  const rule = E.rule && HEAD[E.rule] ? `<div class="encrule">${blocksHTML(sectionBlocks(HEAD[E.rule].book, HEAD[E.rule].i), { noTrack: true, shift: 2 })}</div>` : '';
+  el.innerHTML = `<div class="row"><h3 style="margin:0"><span class="stepn">2</span>${esc(encTitle(E))}</h3><span class="sp"></span><span class="badge">${CTX_LABEL[E.ctx]}</span><button class="btn sm" data-reroll="all">↻ New encounter</button></div>
+    ${E.steps.map(stepRow).join('')}
+    ${E.unknown && E.unknown.length ? `<div class="sm muted">No stat block found for: ${E.unknown.map(esc).join(', ')}</div>` : ''}
+    ${E.disp ? `<div class="encdisp">${stepRow(E.disp)}</div>` : E.dispTable ? `<button class="btn sm" data-reroll="disp">🎲 Roll ${esc(E.dispTable)}</button>` : ''}
+    ${(E.notes || []).map(n => `<p class="sm muted">${esc(n)}</p>`).join('')}
+    ${rule}
+    <div class="row" style="margin-top:8px">
+      ${(E.extras || []).includes('Traveler Rewards') ? `<button class="btn sm" data-rollt="${TB('Traveler Rewards').gid}">🎲 Traveler Rewards (if helped)</button>` : ''}
+      ${(E.extras || []).includes('guards') ? `<button class="btn sm" id="encGuards">+ Add guards (1d6 × ${S.enc.party} PCs)</button>` : ''}
+      ${E.groups.length ? `<button class="btn sm" id="encTerrain">🎲 Combat terrain &amp; distance</button>` : ''}
+    </div><div id="encTerr">${E.terrain ? `<div class="result sm">${E.terrain}</div>` : ''}</div>`;
+  $$('[data-reroll]', el).forEach(b => b.onclick = () => {
+    const k = b.dataset.reroll;
+    if (k === 'all') genEncounter(E.ctx);
+    else if (k === 'disp') rollDisp(E);
+    else if (k === 'comp') { if (E.kind === 'Merchant' || E.kind === 'Bad Weather') { genEncounter(E.ctx); } else { rollComp(E); placeCreatures(E); } }
+    save(); renderEncWhat(); renderEncWho();
+  });
+  if ($('#encGuards')) $('#encGuards').onclick = () => {
+    let n = 0; for (let i = 0; i < S.enc.party; i++) n += rnd(6);
+    const tally = {}; for (let i = 0; i < n; i++) { const r = tRoll('Merchant Guards'); const m = resolveMon(r.txt); if (m) tally[m.id] = (tally[m.id] || 0) + 1; }
+    for (const [mid, c] of Object.entries(tally)) { const g = E.groups.find(x => x.mid === mid); if (g) g.count += c; else E.groups.push({ mid, expr: String(c), count: c }); addCombatant(MON[mid], c, { enc: E.id, quiet: true }); }
+    E.extras = E.extras.filter(x => x !== 'guards'); E.notes.push(`${n} guards rolled.`); save(); renderEncWhat(); renderEncWho();
+  };
+  if ($('#encTerrain')) $('#encTerrain').onclick = () => { const r = tRoll('Combat Terrain'); const dist = rollExpr(strip(r.cells[1] || '').replace(/\s*squares?/, '')); E.terrain = `<b>Terrain</b> (${r.die}): ${fmt(r.cells[0])}<br><b>Starting distance</b>: ${esc(strip(r.cells[1] || ''))}${dist ? ` → <b>${dist.total} squares</b>` : ''}`; save(); $('#encTerr').innerHTML = `<div class="result sm">${E.terrain}</div>`; };
+}
+function renderEncWho() {
+  const el = $('#encWho'); if (!el) return; const E = S.enc.cur;
+  if (!E || !E.groups.length) { el.innerHTML = E ? '' : ''; return; }
+  const pcs = S.combat.list.filter(c => c.pc);
+  el.innerHTML = `<div class="card" style="margin-top:12px" id="encRound"><div class="row"><h3 style="margin:0"><span class="stepn">3</span>Stat blocks &amp; health</h3><span class="sp"></span>
+      ${S.roster.length && !pcs.length ? `<button class="btn sm" id="encPCs">+ Add the party (${S.roster.length})</button>` : ''}
+      <a class="btn sm" href="#/combat">Open in Combat tab</a><button class="btn sm" id="encClear">Clear encounter</button></div>
+      <div style="margin-top:8px">${roundBarHTML()}</div>
+      ${pcs.length ? `<details style="margin-top:8px"><summary class="sm muted">PCs in this fight (${pcs.length})</summary><div id="encPCList"></div></details>` : ''}</div>
+    ${E.groups.map(g => { const m = MON[g.mid]; return `<div class="encgrp"><div>${statBlockHTML(m, { openDesc: false })}</div><div><div class="row"><h4 style="margin:4px 0">${g.count} × ${esc(m.name)}</h4><span class="sp"></span><button class="btn sm" data-addone="${m.id}">+1</button></div><div data-grp="${m.id}"></div></div></div>`; }).join('')}`;
+  const rr = () => renderEncWho();
+  bindRoundBar($('#encRound'), rr);
+  E.groups.forEach(g => renderCombatants($(`[data-grp="${g.mid}"]`, el), c => c.enc === E.id && c.mid === g.mid, rr));
+  if ($('#encPCList')) renderCombatants($('#encPCList'), c => c.pc, rr);
+  if ($('#encPCs')) $('#encPCs').onclick = () => { S.roster.forEach(r => S.combat.list.push({ id: uid(), name: r.name, pc: true, sta: '', staMax: '', ad: '', adMax: '', conds: [] })); save(); rr(); };
+  $$('[data-addone]', el).forEach(b => b.onclick = () => { const g = E.groups.find(x => x.mid === b.dataset.addone); g.count++; addCombatant(MON[g.mid], 1, { enc: E.id, quiet: true }); rr(); });
+  $('#encClear').onclick = () => { if (!confirm('Clear this encounter and remove its creatures from combat?')) return; S.combat.list = S.combat.list.filter(c => c.enc !== E.id); S.enc.history = [{ at: E.at, ctx: E.ctx, title: encTitle(E), disp: E.disp ? strip(E.disp.html).slice(0, 90) : '' }, ...(S.enc.history || [])].slice(0, 12); S.enc.cur = null; save(); VIEWS.encounters(); };
+}
+
 
 /* ---------------- rollers ---------------- */
 VIEWS.rollers = () => {
@@ -802,56 +1083,287 @@ VIEWS.rollers = () => {
   $('#hexLost').onclick = () => { const d = rnd(6); const h = `<b>Lost</b>: d6 = ${d} → the group actually moves <b>${['north', 'northeast', 'southeast', 'south', 'southwest', 'northwest'][d - 1]}</b> (count clockwise from the northern hex). Keep it secret!`; addLog(h, { quiet: true }); out('#hOut', h); };
 };
 
-/* ---------------- travel ---------------- */
+/* ---------------- travel roles ---------------- */
+const ROLE_DEFS = {
+  supporter: { n: 'Supporter', many: true, h: 'rules-supporter', blurb: 'Helps the others do their jobs. Any number. Rolls first.', tasks: [
+    { k: 'fight', n: 'Fight the Miasma', safe: true, h: 'rules-safe-fight-the-miasma', eff: 'Pick an ally: +1 on their next Mind RR against the Miasma.' },
+    { k: 'support', n: 'Support Everyone', roll: '2d10 + M or S', h: 'rules-risky-support-everyone', t: ['Up to 3 allies in roles take −1 on role tests today.', 'Up to 3 allies in roles gain +1 on role tests today.', 'Up to 3 allies in roles gain +2 on role tests today.'] }] },
+  guide: { n: 'Guide', one: true, h: 'rules-guide', blurb: 'Leads the way. Only one. Rolls after supporters.', tasks: [
+    { k: 'normal', n: 'Normal Route', safe: true, h: 'rules-safe-normal-route', eff: '+1 hex today.' },
+    { k: 'secret', n: 'Secret Path', roll: '2d10 + A or M', h: 'rules-risky-secret-path', t: ['The group gets LOST.', 'Travel EN −1, but 1 hex less today.', 'Travel EN −2.'] },
+    { k: 'shortcut', n: 'Shortcut', roll: '2d10 + A or M', h: 'rules-risky-shortcut', t: ['The group gets LOST.', '+1 hex, but travel EN +1.', '+2 hexes.'] },
+    { k: 'back', n: 'Back on Track (only while lost)', roll: '2d10 + M', h: 'rules-risky-back-on-track', t: ['Still lost.', 'You realize where you are at the end of today’s journey.', 'You realize where you are at the start of today’s journey.'] }] },
+  scout: { n: 'Scout', one: true, h: 'rules-scout', blurb: 'Watches for danger, shelter and treasure. Only one (two if one Scouts for Places).', tasks: [
+    { k: 'danger', n: 'Scout for Danger', safe: true, h: 'rules-safe-scout-for-danger', eff: 'Travel EN −1 today.' },
+    { k: 'places', n: 'Scout for Places', safe: true, h: 'rules-safe-scout-for-places', eff: 'Find any unknown POI, dungeon or village in the hexes you cross. A second scout may take a different task.' },
+    { k: 'shelter', n: 'Scout for Shelter', roll: '2d10 + A or M', h: 'rules-risky-scout-for-shelter', t: ['Extra encounter check the next time you rest outdoors.', 'Resting outdoors today: EN −1. Travel EN +1.', 'Found a ruin to rest in outside the Miasma (10% chance it’s already inhabited).'] },
+    { k: 'treasure', n: 'Treasure Hunt', roll: '2d10 + M or S', h: 'rules-risky-treasure-hunt', t: ['Extra travel encounter check.', 'Roll on Minor Treasures, plus an extra travel encounter check.', 'Roll on Minor Treasures.'] }] },
+  tracker: { n: 'Tracker', many: true, h: 'rules-tracker', blurb: 'Finds food or a specific creature. Any number. Rolls last.', tasks: [
+    { k: 'forage', n: 'Forage', safe: true, h: 'rules-safe-forage', eff: 'Gain 1 ration.' },
+    { k: 'hunt', n: 'Hunt', roll: '2d10 + A or S', h: 'rules-risky-hunt', t: ['Extra travel encounter check.', 'Gain 1d6 rations; travel EN +1.', 'Gain 3d6 rations and 1d6 animal parts.'] },
+    { k: 'track', n: 'Track Specific Creature', roll: '2d10 + A or M', h: 'rules-risky-track-specific-creature', t: ['Extra travel encounter check.', 'You find a sign; the creature is 1 hex off your path (Ref picks the hex).', 'You meet the creature today (Ref picks when and where).'] }] },
+};
+const ROLE_ORDER = ['supporter', 'guide', 'scout', 'tracker'];
+function taskDef(r) { return ROLE_DEFS[r.role]?.tasks.find(t => t.k === r.task); }
+function supportBonus() { const s = (S.travel.roles || []).find(r => r.role === 'supporter' && r.task === 'support' && r.tier); return s ? [0, -1, 1, 2][s.tier] : 0; }
+function travelCalc() {
+  const T = S.travel; const base = travelBaseEN();
+  let hex = { slow: 1, normal: 2, fast: 3 }[T.pace] || 2, en = base, restAdj = 0, extra = 0, extraRest = 0, lost = !!T.lost; const notes = [];
+  hex += { s3: -1, normal: 0, s7: 1, s10: 2 }[T.slow] || 0;
+  if (T.road) hex += 1; if (T.river) hex -= 1; if (T.down) hex += 1;
+  for (const r of T.roles || []) {
+    const t = r.tier || 0, who = r.who ? esc(r.who) + ': ' : '';
+    switch (r.task) {
+      case 'normal': hex += 1; break;
+      case 'secret': if (t === 1) lost = true; if (t === 2) { en -= 1; hex -= 1; } if (t === 3) en -= 2; break;
+      case 'shortcut': if (t === 1) lost = true; if (t === 2) { hex += 1; en += 1; } if (t === 3) hex += 2; break;
+      case 'back': if (t === 2) notes.push(who + 'the group finds its bearings at the end of today.'); if (t === 3) { lost = false; notes.push(who + 'the group knows where it is from the start of today.'); } break;
+      case 'danger': en -= 1; break;
+      case 'places': notes.push(who + 'reveal any unknown POIs, dungeons or villages in the hexes crossed.'); break;
+      case 'shelter': if (t === 1) extraRest++; if (t === 2) { restAdj -= 1; en += 1; } if (t === 3) notes.push(who + 'found a ruin to rest outside the Miasma (10% inhabited).'); break;
+      case 'treasure': if (t === 1 || t === 2) extra++; if (t >= 2) notes.push(who + `found treasure <button class="btn sm" data-rollt="${TB('Minor Treasures').gid}">🎲 Minor Treasures</button>`); break;
+      case 'forage': notes.push(who + '+1 ration.'); break;
+      case 'hunt': if (t === 1) extra++; if (t === 2) { en += 1; notes.push(who + `<button class="btn sm" data-roll="1d6">🎲 1d6 rations</button>`); } if (t === 3) notes.push(who + `<button class="btn sm" data-roll="3d6">🎲 3d6 rations</button> <button class="btn sm" data-roll="1d6">🎲 1d6 animal parts</button>`); break;
+      case 'track': if (t === 1) extra++; if (t === 2) notes.push(who + 'found a sign; the creature is 1 hex off the path.'); if (t === 3) notes.push(who + 'meets the tracked creature today.'); break;
+      case 'fight': notes.push(who + `+1 to ${r.target ? esc(r.target) + '’s' : 'an ally’s'} next Miasma RR.`); break;
+    }
+  }
+  en += +T.enx || 0;
+  return { hex: Math.max(0, hex), en: Math.max(1, en), restEn: Math.max(1, base + restAdj), extra, extraRest, lost, notes };
+}
+
+/* ---------------- views: travel day ---------------- */
 VIEWS.travel = () => {
-  const T = S.travel;
-  const head = HEAD['rules-overland-travel'] ? '#/book/rules/rules-overland-travel' : '#/book/rules';
-  $('#main').innerHTML = `<div class="page-title"><h1>Travel day</h1><span class="muted">Hexes are 5 miles across. <a href="${head}">Full overland travel rules</a></span></div>
+  const T = S.travel; T.roles = T.roles || [];
+  const L = (id, t = 'rules') => HEAD[id] ? ` <a class="rlink sm" data-h="${id}">${t}</a>` : '';
+  const sel = (id, opts, val) => `<select id="${id}">${opts.map(o => `<option ${o === val ? 'selected' : ''}>${esc(o)}</option>`).join('')}</select>`;
+  $('#main').innerHTML = `<div class="page-title"><h1>Travel day</h1><span class="muted">Follow the steps top to bottom. Hexes are 5 miles. Day ${T.day || 1}.</span><span class="sp"></span><button class="btn" id="trNew">Start a new travel day</button></div>
   <div class="grid dash">
-    <div class="card"><h3>1. Pace &amp; route</h3>
+    <div class="card"><h3><span class="stepn">1</span>Pace &amp; route${L('rules-travel-pace')}</h3>
       <div class="kv">
-        <span>Pace</span><select data-t="pace"><option value="slow">Slow — 1 hex, EN 2, role tests gain an edge</option><option value="normal">Normal — 2 hexes, EN 4</option><option value="fast">Fast — 3 hexes, EN 6, role tests take a bane</option></select>
+        <span>Pace</span><select data-t="pace"><option value="slow">Slow — 1 hex · EN 2 · role tests gain an edge</option><option value="normal">Normal — 2 hexes · EN 4</option><option value="fast">Fast — 3 hexes · EN 6 · role tests take a bane</option></select>
         <span>Slowest speed</span><select data-t="slow"><option value="s3">3 or lower (−1 hex)</option><option value="normal">4–6</option><option value="s7">7–9 (+1 hex)</option><option value="s10">10+ (+2 hexes)</option></select>
-        <span>Route</span><span><label><input type="checkbox" data-t="road"> Road all day (+1)</label><br><label><input type="checkbox" data-t="river"> Cross river without bridge / go upstream (−1)</label><br><label><input type="checkbox" data-t="down"> Downstream on water (+1)</label></span>
-      </div></div>
-    <div class="card"><h3>2. Roles</h3>
-      <div class="kv">
-        <span>Guide</span><select data-t="guide"><option value="none">No guide / Normal Route not taken</option><option value="normal">Safe: Normal Route (+1 hex)</option><option value="secret1">Secret Path — tier 1: LOST</option><option value="secret2">Secret Path — tier 2 (EN −1, −1 hex)</option><option value="secret3">Secret Path — tier 3 (EN −2)</option><option value="short1">Shortcut — tier 1: LOST</option><option value="short2">Shortcut — tier 2 (+1 hex, EN +1)</option><option value="short3">Shortcut — tier 3 (+2 hexes)</option></select>
-        <span>Scout</span><select data-t="scout"><option value="none">None / other</option><option value="danger">Safe: Scout for Danger (EN −1)</option><option value="places">Safe: Scout for Places (find hidden POIs)</option><option value="shelter1">Shelter — tier 1 (extra rest encounter check)</option><option value="shelter2">Shelter — tier 2 (rest EN −1, travel EN +1)</option><option value="shelter3">Shelter — tier 3 (ruin outside the Miasma)</option></select>
-        <span>Other EN</span><input type="number" data-t="enx" value="${T.enx || 0}" style="width:70px">
+        <span>Route</span><span><label><input type="checkbox" data-t="road"> Road all day (+1 hex)</label><br><label><input type="checkbox" data-t="river"> Cross a river without a bridge, or go upstream (−1)</label><br><label><input type="checkbox" data-t="down"> Downstream on water (+1)</label></span>
+        <span>Habitat</span>${sel('trHab', Object.keys(HABITATS), S.enc.habitat)}
+        <span>Nearest dungeon</span>${sel('trNear', ['Angel', 'Blood', 'Demon', 'Plant', 'Undead'], S.enc.nearby)}
+        <span>Climate / season</span>${sel('trClim', Object.keys(WEATHER), S.enc.climate)}
       </div>
-      <p class="sm muted">Supporters roll first, then guide, scouts, trackers. Risky tasks use the test roller. Hunting tier 2 also raises EN by 1 (use “Other EN”).</p></div>
-    <div class="card"><h3>3. Result</h3><div id="trOut"></div>
-      <div class="row" style="margin-top:8px"><button class="btn primary" id="trEnc">Two encounter checks</button><button class="btn" data-rollt="${D.tables.find(t => t.name === 'Travel Encounters')?.gid}">🎲 Travel Encounters</button><button class="btn" id="trLost">Lost direction (d6)</button></div>
-      <div id="trRes"></div></div>
-    <div class="card"><h3>4. End of day</h3><ol class="checklist">
-      <li>Explore a dungeon or POI? Switch to dungeon turns.</li>
-      <li>Rest: consume a ration; resting in the Miasma restores no Effort. <button class="btn sm" id="trRest">Rest encounter check</button></li>
-      <li>Each human makes a Mind RR against the Miasma — <a href="#/rollers">Miasma roller</a>.</li>
-      <li>Animal tables by habitat: ${D.tables.filter(t => /Animal Encounters/.test(t.name)).map(t => `<span class="tlink" data-t="${t.gid}">${esc(t.name.replace(' Animal Encounters', ''))}</span>`).join(', ')}</li></ol></div>
-  </div>`;
-  const calc = () => {
-    let hex = { slow: 1, normal: 2, fast: 3 }[T.pace], en = { slow: 2, normal: 4, fast: 6 }[T.pace]; const notes = [];
-    hex += { s3: -1, normal: 0, s7: 1, s10: 2 }[T.slow];
-    if (T.road) hex += 1; if (T.river) hex -= 1; if (T.down) hex += 1;
-    const g = T.guide; let lost = false;
-    if (g === 'normal') hex += 1; if (g === 'secret2') { en -= 1; hex -= 1; } if (g === 'secret3') en -= 2; if (g === 'short2') { hex += 1; en += 1; } if (g === 'short3') hex += 2;
-    if (g === 'secret1' || g === 'short1') lost = true;
-    if (T.scout === 'danger') en -= 1; if (T.scout === 'shelter2') { en += 1; notes.push('Resting tonight: EN −1.'); } if (T.scout === 'shelter1') notes.push('Extra encounter check next time you rest outdoors.'); if (T.scout === 'shelter3') notes.push('Found a ruin to rest outside the Miasma (10% inhabited).');
-    en += +T.enx || 0; en = Math.max(1, en); hex = Math.max(0, hex);
-    T.en = en; save();
-    $('#trOut').innerHTML = `<div class="big" style="font-size:1.6rem;font-weight:700">${hex} hex${hex === 1 ? '' : 'es'} <span class="muted" style="font-size:1rem">(${hex * 5} miles)</span></div><div>Travel EN <b>${en}</b>${lost ? ' · <b style="color:var(--bad)">The group is LOST</b> — roll a direction each time they leave a hex.' : ''}</div>${notes.map(n => `<div class="sm">${n}</div>`).join('')}`;
-  };
+      <p class="sm muted" style="margin-bottom:0">The group moves at the speed of its slowest member (mount or vehicle counts). Habitat, nearest dungeon and climate feed the Encounter hub.</p></div>
+
+    <div class="card wide"><div class="row"><h3 style="margin:0"><span class="stepn">2</span>Travel roles${L('rules-travel-roles')}</h3><span class="sp"></span>${ROLE_ORDER.map(k => `<button class="btn sm" data-addrole="${k}">+ ${ROLE_DEFS[k].n}</button>`).join('')}</div>
+      <p class="sm muted">Resolve in order: supporters → guide → scout → trackers. Safe tasks just work. Risky tasks roll 2d10 + the listed characteristic${T.pace === 'slow' ? ' <b>with an edge (slow pace)</b>' : T.pace === 'fast' ? ' <b>with a bane (fast pace)</b>' : ''}. Anyone without a role can assist a risky task.${supportBonus() ? ` <b>Support Everyone: ${supportBonus() > 0 ? '+' : ''}${supportBonus()}</b> for up to 3 allies (tick “supported”).` : ''}</p>
+      <div id="roleBoard"></div></div>
+
+    <div class="card"><h3><span class="stepn">3</span>How far &amp; how dangerous</h3><div id="trOut"></div></div>
+
+    <div class="card"><h3><span class="stepn">4</span>Encounter checks${L('rules-encounters-and-pois')}</h3>
+      <p class="sm muted" style="margin-top:0">Two checks per travel day, plus any extras from risky roles. You choose when during the day an encounter happens. Points of interest on the route are run with dungeon turns.</p>
+      <button class="btn primary" id="trEnc">Roll today’s encounter checks</button><div id="trRes"></div></div>
+
+    <div class="card ${travelCalc().lost ? 'lostcard' : ''}"><h3><span class="stepn">5</span>Getting lost${L('rules-lost')}</h3>
+      <div class="row"><label><input type="checkbox" id="trLostFlag" ${T.lost ? 'checked' : ''}> The group is lost</label><button class="btn sm" id="trLost">🎲 Which hex? (d6)</button></div>
+      <p class="sm muted" style="margin-bottom:0">Roll secretly each time a lost group leaves a hex. Count clockwise from the northern hex: 1 N · 2 NE · 3 SE · 4 S · 5 SW · 6 NW. Next day, the guide can only try <i>Back on Track</i> (or the group finds a map, a landmark or directions).</p><div id="trLostOut"></div></div>
+
+    <div class="card"><h3><span class="stepn">6</span>End of the day</h3><ol class="checklist">
+      <li>Reached a dungeon or POI? Switch to dungeon turns on <a href="#/session">Session</a>.</li>
+      <li>Make camp and rest: encounter check, rest activities, Miasma RRs. <a class="btn sm" href="#/rest" id="trCamp">Go to Rest →</a></li></ol></div>
+  </div>
+  <h2>Travel roles reference</h2><p class="muted sm">Read these out when the players pick roles. Click a task name for the full rule.</p>
+  <div class="grid rolesref">${ROLE_ORDER.map(k => { const d = ROLE_DEFS[k]; return `<div class="card"><h3 style="margin-top:0">${d.n}${L(d.h)}</h3><p class="sm muted">${d.blurb}</p>${d.tasks.map(t => `<div class="taskref"><div class="row"><span class="badge ${t.safe ? 'safe' : 'risky'}">${t.safe ? 'Safe' : 'Risky'}</span><span class="rlink" data-h="${t.h}"><b>${esc(t.n)}</b></span>${t.roll ? `<span class="faint sm">${t.roll}</span>` : ''}</div>${t.safe ? `<div class="sm">${esc(t.eff)}</div>` : `<div class="sm">${t.t.map((x, i) => `<div><span class="g g${i + 1}">${TIER_LBL[i + 1]}</span>${esc(x)}</div>`).join('')}</div>`}</div>`).join('')}</div>`; }).join('')}</div>`;
+
   $$('[data-t]').forEach(el => {
     const k = el.dataset.t; if (el.type === 'checkbox') el.checked = !!T[k]; else el.value = T[k] ?? el.value;
-    el.onchange = el.oninput = () => { T[k] = el.type === 'checkbox' ? el.checked : el.value; save(); calc(); };
+    el.onchange = () => { T[k] = el.type === 'checkbox' ? el.checked : el.value; save(); VIEWS.travel(); };
   });
-  calc();
-  const chk = (label, en) => { const d = rnd(10); return `${label}: d10 ${d} vs EN ${en} → ${d <= en ? '<b style="color:var(--bad)">ENCOUNTER</b>' : 'nothing'}`; };
-  $('#trEnc').onclick = () => { const h = `<b>Travel encounter checks</b><br>${chk('Morning', T.en)}<br>${chk('Afternoon', T.en)}`; addLog(h, { quiet: true }); $('#trRes').innerHTML = `<div class="result">${h}</div>`; };
-  $('#trRest').onclick = () => { const en = Math.max(1, { slow: 2, normal: 4, fast: 6 }[T.pace] - (T.scout === 'shelter2' ? 1 : 0)); const h = `<b>Rest encounter check</b>: ${chk('Night', en)}`; addLog(h, { quiet: true }); $('#trRes').innerHTML = `<div class="result">${h}</div>`; };
-  $('#trLost').onclick = () => { const d = rnd(6); const h = `<b>Lost</b>: d6 = ${d} → actually moves <b>${['north', 'northeast', 'southeast', 'south', 'southwest', 'northwest'][d - 1]}</b>`; addLog(h, { quiet: true }); $('#trRes').innerHTML = `<div class="result">${h}</div>`; };
+  $('#trHab').onchange = e => { S.enc.habitat = e.target.value; save(); };
+  $('#trNear').onchange = e => { S.enc.nearby = e.target.value; save(); };
+  $('#trClim').onchange = e => { S.enc.climate = e.target.value; save(); };
+  $$('[data-addrole]').forEach(b => b.onclick = () => { const k = b.dataset.addrole; const d = ROLE_DEFS[k]; T.roles.push({ id: uid(), role: k, who: '', task: d.tasks[0].k, tier: 0, mod: 0, sup: false }); save(); VIEWS.travel(); });
+  renderRoleBoard(); renderTravelOut();
+  $('#trEnc').onclick = () => {
+    const tc = travelCalc(); S.en.ctx = 'travel'; const out = $('#trRes'); out.innerHTML = '';
+    const n = 2 + tc.extra;
+    for (let i = 0; i < n; i++) encounterCheck(out, { ctx: 'travel', label: i < 2 ? ['Morning check', 'Afternoon check'][i] : `Extra check ${i - 1}`, append: true, quiet: true });
+    save();
+  };
+  $('#trLostFlag').onchange = e => { T.lost = e.target.checked; save(); VIEWS.travel(); };
+  $('#trLost').onclick = () => { const d = rnd(6); const h = `<b>Lost</b>: d6 = ${d} → they actually enter the hex to the <b>${['north', 'northeast', 'southeast', 'south', 'southwest', 'northwest'][d - 1]}</b>. Keep it secret!`; addLog(h, { quiet: true }); $('#trLostOut').innerHTML = `<div class="result">${h}</div>`; };
+  $('#trCamp').onclick = () => { S.rest.where = S.rest.where === 'dungeon' ? 'miasma' : S.rest.where; S.en.ctx = 'trest'; save(); };
+  $('#trNew').onclick = () => {
+    if (!confirm('Start a new travel day? Role assignments stay; today’s rolls are cleared.')) return;
+    const tc = travelCalc(); T.lost = tc.lost; T.day = (T.day || 1) + 1;
+    T.roles.forEach(r => { r.tier = 0; r.roll = ''; r.sup = false; if (T.lost && r.role === 'guide') r.task = 'back'; if (!T.lost && r.task === 'back') r.task = 'normal'; });
+    save(); VIEWS.travel();
+  };
 };
+function renderRoleBoard() {
+  const T = S.travel, el = $('#roleBoard'); if (!el) return;
+  const roles = [...T.roles].sort((a, b) => ROLE_ORDER.indexOf(a.role) - ROLE_ORDER.indexOf(b.role));
+  const names = S.roster.map(r => r.name);
+  const guides = roles.filter(r => r.role === 'guide').length, scouts = roles.filter(r => r.role === 'scout');
+  const warn = [];
+  if (guides > 1) warn.push('Only one guide at a time.');
+  if (scouts.length > 2 || (scouts.length === 2 && !scouts.some(s => s.task === 'places'))) warn.push('Only one scout — unless one of them takes Scout for Places.');
+  el.innerHTML = (roles.length ? roles.map(r => {
+    const d = ROLE_DEFS[r.role], t = taskDef(r) || d.tasks[0];
+    return `<div class="rolerow" data-role="${r.id}">
+      <div class="row"><span class="badge">${d.n}</span>
+        <input data-rf="who" list="rosterNames" placeholder="Who?" value="${esc(r.who || '')}" style="width:130px">
+        <select data-rf="task">${d.tasks.filter(x => x.k !== 'back' || T.lost || r.task === 'back').map(x => `<option value="${x.k}" ${x.k === r.task ? 'selected' : ''}>${x.safe ? 'Safe' : 'Risky'}: ${esc(x.n)}</option>`).join('')}</select>
+        ${t.k === 'fight' ? `<input data-rf="target" list="rosterNames" placeholder="Which ally?" value="${esc(r.target || '')}" style="width:120px">` : ''}
+        ${t.safe ? `<span class="sm">${esc(t.eff)}</span>` : `<span class="faint sm">${t.roll} +</span><input data-rf="mod" type="number" value="${r.mod || 0}" style="width:52px" title="Characteristic + assists + other bonuses">
+          ${supportBonus() && r.role !== 'supporter' ? `<label class="sm"><input type="checkbox" data-rf="sup" ${r.sup ? 'checked' : ''}> supported</label>` : ''}
+          <button class="btn sm primary" data-rroll>Roll</button>
+          ${[1, 2, 3].map(n => `<span class="chip ${r.tier === n ? 'on' : ''}" data-tier="${n}" title="Set the result by hand">${TIER_LBL[n]}</span>`).join('')}`}
+        <span class="sp"></span><button class="icon-btn" data-rdel title="Remove">✕</button></div>
+      ${!t.safe && r.tier ? `<div class="sm rolres"><span class="g g${r.tier}">${TIER_LBL[r.tier]}</span>${esc(t.t[r.tier - 1])}${r.roll ? ` <span class="faint">(${r.roll})</span>` : ''}</div>` : ''}
+    </div>`;
+  }).join('') : '<p class="muted sm">No roles yet. Add a guide, a scout and whoever else wants a job today.</p>')
+    + (warn.length ? `<div class="notice sm">${warn.join(' ')}</div>` : '')
+    + `<datalist id="rosterNames">${names.map(n => `<option value="${esc(n)}">`).join('')}</datalist>`;
+  $$('.rolerow', el).forEach(row => {
+    const r = T.roles.find(x => x.id === row.dataset.role);
+    $$('[data-rf]', row).forEach(inp => inp.onchange = () => { const k = inp.dataset.rf; r[k] = inp.type === 'checkbox' ? inp.checked : inp.type === 'number' ? (+inp.value || 0) : inp.value; if (k === 'task') { r.tier = 0; r.roll = ''; } save(); renderRoleBoard(); renderTravelOut(); });
+    $$('[data-tier]', row).forEach(c => c.onclick = () => { r.tier = r.tier === +c.dataset.tier ? 0 : +c.dataset.tier; r.roll = ''; save(); renderRoleBoard(); renderTravelOut(); });
+    const rb = $('[data-rroll]', row); if (rb) rb.onclick = () => {
+      const t = taskDef(r); const bonus = r.sup && r.role !== 'supporter' ? supportBonus() : 0;
+      const res = doTest({ mod: +r.mod || 0, bonus, edges: S.travel.pace === 'slow' ? 1 : 0, banes: S.travel.pace === 'fast' ? 1 : 0, label: `${r.who || ROLE_DEFS[r.role].n}: ${t.n}` });
+      r.tier = res.tier; r.roll = `${res.total}${res.crit ? ', crit' : res.doom ? ', doom' : ''}`; addLog(res.html + '<br>' + esc(t.t[res.tier - 1]), { quiet: true }); save(); renderRoleBoard(); renderTravelOut();
+    };
+    $('[data-rdel]', row).onclick = () => { T.roles = T.roles.filter(x => x.id !== r.id); save(); VIEWS.travel(); };
+  });
+}
+function renderTravelOut() {
+  const el = $('#trOut'); if (!el) return; const tc = travelCalc();
+  el.innerHTML = `<div class="big" style="font-size:1.6rem;font-weight:700">${tc.hex} hex${tc.hex === 1 ? '' : 'es'} <span class="muted" style="font-size:1rem">(${tc.hex * 5} miles)</span></div>
+    <div class="kv sm" style="margin-top:6px"><span>Travel EN</span><b>${tc.en}</b><span>Encounter checks today</span><b>${2 + tc.extra}${tc.extra ? ` (2 + ${tc.extra} extra)` : ''}</b><span>Rest EN tonight</span><b>${tc.restEn}${tc.extraRest ? ` + ${tc.extraRest} extra check` : ''}</b>
+    <span>Other EN changes</span><input type="number" id="trEnx" value="${S.travel.enx || 0}" style="width:60px"></div>
+    ${tc.lost ? '<div class="notice sm" style="margin-top:8px"><b>The group is lost.</b> Roll a direction in step 5 each time they leave a hex.</div>' : ''}
+    ${tc.notes.length ? `<ul class="sm" style="padding-left:18px;margin:8px 0 0">${tc.notes.map(n => `<li>${n}</li>`).join('')}</ul>` : ''}
+    <p class="sm muted" style="margin-bottom:0">Bad weather cuts travel: rain −1 hex; thunderstorm, sandstorm or blizzard −2.</p>`;
+  $('#trEnx').onchange = e => { S.travel.enx = +e.target.value || 0; save(); renderTravelOut(); };
+}
+
+/* ---------------- views: rest ---------------- */
+const REST_ACTS = [
+  ['', '— no activity —', null], ['sleep', 'Good Night’s Rest', 'rules-good-night-s-rest'], ['craft', 'Craft Equipment', 'rules-craft-equipment'],
+  ['harvest', 'Harvest a monster corpse', 'rules-harvest'], ['identify', 'Identify Item', 'rules-identify-item'], ['repair', 'Repair Armor', 'rules-repair-armor'],
+  ['seclude', 'Seclude Camp', 'rules-seclude-camp'], ['tend', 'Tend Wounds', 'rules-tend-wounds'], ['watch', 'Keep watch / other', null]];
+const REST_WHERE = { miasma: 'Outdoors in the Miasma', clear: 'Outdoors, no Miasma (ruin, beacon)', dungeon: 'In a dungeon', village: 'In a village' };
+function restPC(name) { const P = S.rest.pcs; return P[name] ||= { ate: true, act: '', target: '', mind: 0, cru: 0, res: '' }; }
+VIEWS.rest = () => {
+  const R = S.rest; const inMiasma = R.where === 'miasma';
+  const L = (id, t = 'rules') => HEAD[id] ? ` <a class="rlink sm" data-h="${id}">${t}</a>` : '';
+  const ctx = R.where === 'dungeon' ? 'drest' : 'trest';
+  const seclude = S.roster.some(r => restPC(r.name).act === 'seclude');
+  if (S.en.seclude !== seclude && S.roster.length) { S.en.seclude = seclude; save(); }
+  const resting = S.dt.resting;
+  $('#main').innerHTML = `<div class="page-title"><h1>Rest</h1><span class="muted">Night ${R.day || 1}. Six uninterrupted hours, four of them asleep, and a ration each.</span></div>
+  <div class="grid dash">
+    <div class="card"><h3><span class="stepn">1</span>Where are you resting?</h3>
+      <div class="row">${Object.entries(REST_WHERE).map(([k, l]) => `<span class="chip ${R.where === k ? 'on' : ''}" data-where="${k}">${l}</span>`).join('')}</div>
+      <ul class="sm" style="padding-left:18px">
+        <li>A rest ends the current dungeon turn <b>without</b> an encounter check. Halfway through, effects that end or roll UD at the end of a DT end. A new DT starts when the rest ends.${L('rules-resting')}</li>
+        <li>Interrupted by combat or other strenuous activity? Start over to get the benefits.</li>
+        <li>After finishing a rest you can’t benefit from another for 6 hours or 3 DTs.</li>
+        <li>${inMiasma ? '<b>In the Miasma: no Effort comes back</b> (Good Night’s Rest still gives +1), and each human makes a Mind RR afterwards.' : 'Outside the Miasma: Effort comes back, and everyone loses all cruelty levels.'}</li></ul>
+      ${S.dt.num ? (resting ? `<div class="notice sm">Resting — DT ${S.dt.num} has ended. Finishing the rest starts DT ${S.dt.num + 1}.</div>` : `<button class="btn" id="rsStart">Start resting (ends DT ${S.dt.num}, no encounter check)</button>`) : ''}</div>
+
+    <div class="card" id="rsEnc"><h3><span class="stepn">2</span>Rest encounter check${L('rules-rest-encounters')}</h3>
+      <p class="sm muted" style="margin-top:0">${ctx === 'drest' ? 'Uses the dungeon’s EN (3–5).' : 'Uses today’s travel pace EN (slow 2 · normal 4 · fast 6), plus Scout for Shelter results.'} Seclude Camp lowers it by 1 ${seclude ? '<b>(someone is secluding camp)</b>' : ''}.</p>
+      <p style="margin:4px 0">EN <b class="enVal" style="font-size:1.4rem">${enValue(ctx)}</b>${ctx === 'trest' && travelCalc().extraRest ? ` · <b>${travelCalc().extraRest} extra check</b> (Scout for Shelter)` : ''}</p>
+      <button class="btn primary" id="rsCheck">Roll rest encounter check${ctx === 'trest' && travelCalc().extraRest ? 's' : ''}</button><div id="rsOut"></div></div>
+
+    <div class="card wide"><h3><span class="stepn">3</span>Who’s doing what tonight${L('rules-rest-activities', 'activities')}</h3>
+      ${S.roster.length ? `<div id="rsPCs"></div>` : `<p class="muted">Add your party on <a href="#/notes">Notes &amp; roster</a> to track each PC’s rest.</p>`}
+      <details class="sm" style="margin-top:8px"><summary class="muted">What each activity does</summary><ul style="padding-left:18px">${REST_ACTS.filter(a => a[2]).map(a => `<li><span class="rlink" data-h="${a[2]}"><b>${a[1]}</b></span>: ${esc(ruleTip(a[2]))}</li>`).join('')}</ul></details></div>
+
+    <div class="card"><h3><span class="stepn">4</span>When the rest finishes</h3><div id="rsSum"></div>
+      <div class="row" style="margin-top:8px"><button class="btn primary" id="rsFinish">Finish rest</button><button class="btn" id="rsInterrupt">Rest interrupted</button></div>
+      <p class="sm muted">Finish rest: logs the night, restores usage dice marked “restores on rest”, clears DT conditions, ${S.dt.num ? `starts DT ${S.dt.num + 1}, ` : ''}and moves to night ${(R.day || 1) + 1}.</p></div>
+
+    <div class="card"><h3>No rest, no food${L('rules-exhaustion')}</h3><ul class="sm" style="padding-left:18px;margin:0">
+      <li>Each day without finishing a rest: an <b>exhaustion wound</b> (all removed by a finished rest).</li>
+      <li>Each day without 1 ration: a <b>starvation wound</b> (all removed by eating 1 ration).</li>
+      <li>Rest activities outside a rest take about 2 hours each, up to 4 a day.</li></ul>
+      ${(R.log || []).length ? `<details style="margin-top:8px"><summary class="sm muted">Past nights (${R.log.length})</summary>${R.log.map(l => `<div class="sm" style="border-bottom:1px solid #23272c;padding:4px 0">${l}</div>`).join('')}</details>` : ''}</div>
+  </div>`;
+  $$('[data-where]').forEach(c => c.onclick = () => { R.where = c.dataset.where; S.en.ctx = R.where === 'dungeon' ? 'drest' : 'trest'; save(); VIEWS.rest(); });
+  if ($('#rsStart')) $('#rsStart').onclick = () => { if (S.dt.running) S.dt.left = dtLeft(); S.dt.running = false; S.dt.pendingEnd = false; S.dt.resting = true; save(); addLog(`<b>Rest begins</b> — DT ${S.dt.num} ends (no encounter check).`, { quiet: true }); VIEWS.rest(); tick(); };
+  $('#rsCheck').onclick = () => {
+    S.en.ctx = ctx; const out = $('#rsOut'); out.innerHTML = '';
+    const n = 1 + (ctx === 'trest' ? travelCalc().extraRest : 0);
+    for (let i = 0; i < n; i++) encounterCheck(out, { ctx, label: n > 1 ? `Rest check ${i + 1}` : 'Rest check', append: true, quiet: true });
+    save();
+  };
+  renderRestPCs(); renderRestSum();
+  $('#rsFinish').onclick = finishRest;
+  $('#rsInterrupt').onclick = () => { addLog(`<b>Rest interrupted</b> (night ${R.day || 1}) — start over to get the benefits.`); };
+};
+function renderRestPCs() {
+  const el = $('#rsPCs'); if (!el) return; const R = S.rest, inMiasma = R.where === 'miasma';
+  el.innerHTML = `<div class="restgrid"><div class="rh">PC</div><div class="rh">Ate</div><div class="rh">Activity</div><div class="rh">${inMiasma ? 'Miasma RR (after)' : 'Cruelty'}</div>` + S.roster.map(r => {
+    const p = restPC(r.name);
+    const extra = p.act === 'tend' ? `<select data-p="target"><option value="">Whose wounds?</option>${S.roster.filter(x => x.name !== r.name).map(x => `<option ${p.target === x.name ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select>`
+      : p.act === 'harvest' ? `<select data-p="size">${['Medium or smaller|1d6', 'Large|2d6', 'Huge|3d6', 'Holy Shit!|4d6'].map(s => `<option value="${s.split('|')[1]}" ${p.size === s.split('|')[1] ? 'selected' : ''}>${s.split('|')[0]}</option>`).join('')}</select><button class="btn sm" data-harv>🎲 Parts</button>`
+        : p.act === 'craft' ? `<span class="sm">Mind</span><input type="number" data-p="mind" value="${p.mind || 0}" style="width:48px"><label class="sm"><input type="checkbox" data-p="eff" ${p.eff ? 'checked' : ''}> Effort/double edge (+4)</label><button class="btn sm" data-craft>🎲 Crafting roll</button>` : '';
+    return `<div><b>${esc(r.name)}</b></div>
+      <div><input type="checkbox" data-pn="${esc(r.name)}" data-p="ate" ${p.ate ? 'checked' : ''} title="Ate at least 1 ration"></div>
+      <div class="row" data-pn="${esc(r.name)}"><select data-p="act">${REST_ACTS.map(a => `<option value="${a[0]}" ${p.act === a[0] ? 'selected' : ''}>${a[1]}</option>`).join('')}</select>${extra}${p.res ? `<span class="sm">${p.res}</span>` : ''}</div>
+      <div class="row" data-pn="${esc(r.name)}">${inMiasma ? `<span class="sm">Mind</span><input type="number" data-p="mind" value="${p.mind || 0}" style="width:48px"><span class="sm">Cruelty</span><input type="number" min="0" data-p="cru" value="${p.cru || 0}" style="width:48px"><button class="btn sm" data-mia>🎲 RR</button>${p.mres ? `<span class="sm">${p.mres}</span>` : ''}` : `<span class="sm">Cruelty ${p.cru || 0}${p.cru ? ' → 0 when this rest finishes' : ''}</span>`}</div>`;
+  }).join('') + '</div>';
+  $$('[data-pn]', el).forEach(box => {
+    const name = box.dataset.pn, p = restPC(name);
+    const bind = inp => inp.onchange = () => { const k = inp.dataset.p; p[k] = inp.type === 'checkbox' ? inp.checked : inp.type === 'number' ? (+inp.value || 0) : inp.value; if (k === 'act') p.res = ''; save(); if (k === 'act' || k === 'ate') VIEWS.rest(); else renderRestSum(); };
+    if (box.matches('[data-p]')) bind(box); $$('[data-p]', box).forEach(bind);
+    const h = $('[data-harv]', box); if (h) h.onclick = () => { const r = rollExpr(p.size || '1d6'); p.res = `<b>${r.total} parts</b> (${r.text}) — the corpse is used up`; addLog(`<b>${esc(name)}</b> harvests ${p.res}`, { quiet: true }); save(); renderRestPCs(); };
+    const c = $('[data-craft]', box); if (c) c.onclick = () => {
+      const a = rnd(10), b = rnd(10), nat = a + b; let pts, extra = '';
+      if (nat <= 3) { pts = 0; extra = ' — doom: no points'; } else { pts = Math.max(1, nat + (+p.mind || 0) + (p.eff ? 4 : 0)); if (nat >= 19) extra = ' — crit: make another crafting roll for the same item!'; }
+      p.res = `<b>+${pts} crafting points</b> [${a}, ${b}]${extra}`; addLog(`<b>${esc(name)}</b> crafting roll: ${p.res}`, { quiet: true }); save(); renderRestPCs();
+    };
+    const m = $('[data-mia]', box); if (m) m.onclick = () => {
+      const cru = +p.cru || 0; const r = doTest({ mod: +p.mind || 0, bonus: -cru, label: `${name}: Miasma RR` });
+      let out = r.html;
+      if (r.tier === 1) { p.cru = cru + 1; const g = TB('Miasma Effects'); S.tmods[g.gid] = p.cru; const e = rollTable(g.gid, { quiet: true }); out += `<br>Cruelty → ${p.cru}. ${e.html}`; p.mres = `<span class="tierlbl t1">T1</span> cruelty ${p.cru}, effect rolled (see log)`; }
+      else if (r.tier === 3) { p.cru = 0; out += '<br>Removes all cruelty (or helps another human by a tier).'; p.mres = '<span class="tierlbl t3">T3</span> cruelty cleared'; }
+      else { out += '<br>No effect.'; p.mres = '<span class="tierlbl t2">T2</span> no effect'; }
+      addLog(out); save(); renderRestPCs();
+    };
+  });
+}
+function restSummary() {
+  const R = S.rest, inMiasma = R.where === 'miasma';
+  return S.roster.map(r => {
+    const p = restPC(r.name); const tended = S.roster.some(o => o.name !== r.name && restPC(o.name).act === 'tend' && restPC(o.name).target === r.name);
+    const bits = ['all Stamina back', tended ? '<b>−2 wounds</b> (tended)' : '−1 wound', 'exhaustion wounds gone'];
+    bits.push(inMiasma ? (p.act === 'sleep' ? 'Effort: none back (Miasma), <b>+1 extra</b> from Good Night’s Rest' : '<b>no Effort back</b> (Miasma)') : 'Effort back to max' + (p.act === 'sleep' ? ' <b>+1 extra</b>' : ''));
+    if (!p.ate) bits.push('<b style="color:var(--bad)">no ration: starvation wound for the day</b>');
+    if (p.act === 'repair') bits.push('one armor or shield back to full AD');
+    if (p.act === 'identify') bits.push('learns one magic item’s properties');
+    if (!inMiasma && p.cru) bits.push('cruelty cleared');
+    return `<li><b>${esc(r.name)}</b>: ${bits.join(' · ')}</li>`;
+  }).join('');
+}
+function renderRestSum() {
+  const el = $('#rsSum'); if (!el) return;
+  const ud = S.ud.filter(u => u.rest);
+  el.innerHTML = (S.roster.length ? `<ul class="sm" style="padding-left:18px;margin:0">${restSummary()}</ul>` : '<p class="sm">Everyone: all Stamina back, −1 wound (−2 if tended), exhaustion wounds removed, Effort back unless resting in the Miasma.</p>')
+    + `<p class="sm" style="margin:6px 0 0">Spellbooks and other “Rest” items regain their UD.${ud.length ? ` Tracked: ${ud.map(u => esc(u.name)).join(', ')}.` : ' (Tick “restores on rest” when adding usage dice on Session to have them refilled automatically.)'}</p>`;
+}
+function finishRest() {
+  const R = S.rest, inMiasma = R.where === 'miasma';
+  const night = R.day || 1;
+  const summary = `<b>Night ${night}</b> — ${esc(REST_WHERE[R.where])}<ul style="padding-left:18px;margin:4px 0">${restSummary()}</ul>`;
+  S.ud.forEach(u => { if (u.rest) { u.dice = u.max; u.last = null; } });
+  clearDTConds();
+  S.roster.forEach(r => { const p = restPC(r.name); if (!inMiasma) p.cru = 0; p.act = ''; p.target = ''; p.res = ''; p.mres = ''; p.ate = true; });
+  S.en.seclude = false; R.log = [summary, ...(R.log || [])].slice(0, 20); R.day = night + 1;
+  addLog(`<b>Rest finished</b> (night ${night}).`);
+  if (S.dt.num) { S.dt.resting = false; startDT(S.dt.num + 1); }
+  save(); VIEWS.rest();
+}
+
 
 /* ---------------- cheat sheet ---------------- */
 VIEWS.cheat = () => {
@@ -986,9 +1498,7 @@ const QUAL = {};
   const wt = bl.findIndex(b => b.t === 'h' && b.text === 'Weapon Types');
   if (wt >= 0) for (let j = wt + 1; j < bl.length && bl[j].t !== 'h'; j++) { const m = (bl[j].text || '').match(/^•?\s*<b>([^<:]+):<\/b>\s*(.*)$/); if (m) QUAL[m[1].trim().toLowerCase()] = strip(m[2]); }
 })();
-function qualHTML(s) {
-  return strip(s).split(/,\s*/).map(q => { const k = q.replace(/\s+\d+$/, '').trim().toLowerCase(); const d = QUAL[k]; return d ? `<span class="cond" title="${esc(d)}">${esc(q)}</span>` : esc(q); }).join(', ');
-}
+function qualHTML(s) { const t = esc(strip(s)); return qualityLinks(t) || t; }
 function expandName(n) { const m = n.match(/^(EE|NDT|DH|AO|MW)\s+(.*)$/); return m ? `${esc(n)} <span class="faint sm">(${ABBR[m[1]]})</span>` : esc(n); }
 function slotsOf(c) { const m = (c.extra || '').match(/Occupies\s+(\d+)/i); return m ? +m[1] : 1; }
 function weaponInfo(c) {
@@ -1196,6 +1706,9 @@ document.addEventListener('click', e => {
   const ml = t.closest('.mlink'); if (ml) { e.preventDefault(); openDrawer('monster', ml.dataset.m); return; }
   const il = t.closest('.ilink'); if (il) { e.preventDefault(); openDrawer('item', il.dataset.i); return; }
   const tl = t.closest('.tlink'); if (tl) { e.preventDefault(); openDrawer('table', tl.dataset.t); return; }
+  const rl = t.closest('.rlink'); if (rl) { e.preventDefault(); openDrawer('rule', rl.dataset.h); return; }
+  const gn = t.closest('[data-gen]'); if (gn) { S.enc.autogen = gn.dataset.gen; save(); closeDrawer(); if (location.hash === '#/encounters') VIEWS.encounters(); else location.hash = '#/encounters'; return; }
+  const ab = t.closest('[data-atkb]'); if (ab) { rollAttack(ab.dataset.atkb, +ab.dataset.i); return; }
   const rb = t.closest('.rollbtn[data-g]'); if (rb) { rollTable(rb.dataset.g, { scroll: true }); return; }
   const rt = t.closest('[data-rollt]'); if (rt) { rollTable(rt.dataset.rollt); return; }
   const dr = t.closest('[data-roll]'); if (dr) { const r = rollExpr(dr.dataset.roll); addLog(`<b>${dr.dataset.roll}</b>: ${r.text} = <b>${r.total}</b>`); return; }

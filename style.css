@@ -90,7 +90,7 @@ kbd{background:var(--panel2);border:1px solid var(--line);border-radius:4px;padd
 .toc input{width:100%;margin-bottom:6px}
 .content{max-width:820px}
 .content h1:first-child,.content h2:first-child{margin-top:0}
-.content .pg{font-size:.72rem;color:var(--faint);font-weight:400;margin-left:6px}
+.pg{font-size:.72rem;color:var(--faint);font-weight:400;margin-left:6px}
 .content table,.tbl{border-collapse:collapse;margin:.5em 0 1em;width:100%;font-size:.9rem}
 .content td,.content th,.tbl td,.tbl th{border:1px solid var(--line);padding:4px 8px;vertical-align:top;text-align:left}
 .content th,.tbl th{background:var(--panel2)}
@@ -182,6 +182,34 @@ g,.g{display:inline-block;min-width:3.6em;text-align:center;font-weight:700;font
 .kv{display:grid;grid-template-columns:auto 1fr;gap:4px 12px;font-size:.9rem}
 .notice{background:#2a2316;border:1px solid #5a4a24;border-radius:8px;padding:8px 12px;margin:8px 0}
 
+/* v3: encounter hub, travel roles, rest, rule links */
+.rlink{border-bottom:1px dotted #8fa8c8;cursor:pointer}
+.rlink:hover{color:var(--link)}
+.icard .rlink{border-bottom-color:#7d6f5c}.icard .rlink:hover{color:#2d4f80}
+.stepn{display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:50%;background:var(--accent);color:#fff;font-size:.8rem;font-weight:700;margin-right:8px;vertical-align:2px}
+.dash .wide{grid-column:1/-1}
+.enc-top{grid-template-columns:minmax(0,1fr) minmax(0,1.3fr)}
+.encstep{border-top:1px solid var(--line);padding:7px 0}
+.encdisp{background:#231d14;border:1px solid #5a4a24;border-radius:8px;padding:0 10px;margin-top:6px}
+.encdisp .encstep{border-top:none}
+.encrule{border-top:1px solid var(--line);margin-top:6px;font-size:.9rem}
+.encrule h4,.encrule h5{margin-top:.6em}
+.encgrp{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:12px;margin-top:12px;align-items:start}
+.hpbar{height:5px;background:#2a2f36;border-radius:3px;overflow:hidden;margin-top:6px}
+.hpbar div{height:100%;background:var(--good)}
+.cb.dead .hpbar div{background:var(--bad)}
+.atkbtns{margin-top:6px}.atkbtns .btn{font-size:.8rem}
+.rolerow{border-top:1px solid var(--line);padding:7px 0}
+.rolres{margin:4px 0 0 4px}
+.rolesref{grid-template-columns:repeat(auto-fill,minmax(270px,1fr))}
+.taskref{border-top:1px solid var(--line);padding:6px 0}
+.taskref .g{margin:1px 6px 1px 0}
+.badge.safe{color:#7fd29c;border-color:#2f6a46}.badge.risky{color:#e3c26f;border-color:#7a6331}
+.restgrid{display:grid;grid-template-columns:minmax(90px,auto) 40px minmax(0,1.4fr) minmax(0,1fr);gap:6px 10px;align-items:center}
+.restgrid .rh{font-size:.75rem;text-transform:uppercase;letter-spacing:.05em;color:var(--faint)}
+.lostcard{border-color:var(--bad)}
+@media (max-width:1100px){.enc-top,.encgrp{grid-template-columns:1fr}}
+@media (max-width:700px){.restgrid{grid-template-columns:1fr 40px}.restgrid .rh:nth-child(n+3){display:none}.restgrid>div:nth-child(4n+3),.restgrid>div:nth-child(4n+4){grid-column:1/-1}}
 @media (max-width:1000px){
   .reader{grid-template-columns:1fr}
   .toc{position:static;max-height:260px;border-right:none;border-bottom:1px solid var(--line);padding-bottom:8px}
